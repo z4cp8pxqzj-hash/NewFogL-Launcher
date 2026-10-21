@@ -128,11 +128,27 @@ namespace NewFogL {
                 }
                 if (!msaToken.empty()) break;
             } else {
+                std::string err;
                 try {
                     const nlohmann::json j = nlohmann::json::parse(resp.body);
-                    const std::string err = j.value("error", async? "" : "");
-                    (void)err;
+                    err = j.value("error", "");
                 } catch (...) {}
+
+                if (err == "authorization_pending") {
+                    // User has not completed sign-in yet; keep polling.
+                } else if (err == "slow_down") {
+                    interval += 5;
+                } else if (err == "expired_token" || err == "code_expired") {
+                    result.message = "The device code has expired. Please sign in again.";
+                    return result;
+                } else if (!err.empty()) {
+                    result.message = "Authorization failed: " + err;
+                    return result;
+                } else {
+                    result.message = "Token request failed (HTTP "
+                                   + std::to_string(resp.statusCode) + ").";
+                    return result;
+                }
             }
 
             if (sleepWithCancel(interval, cancelled)) {
