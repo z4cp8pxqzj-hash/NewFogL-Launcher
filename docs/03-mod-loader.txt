@@ -1,0 +1,1504 @@
+================================================================================
+New Fog 加载器 开发文档（完整版·无省略）
+================================================================================
+
+文档版本：1.1.0
+模块名称：newfog-loader.jar
+运行环境：Java 21（强制）
+语言：Java 21
+字节码目标：21
+
+
+================================================================================
+第一部分  模块概述
+================================================================================
+
+New Fog 加载器是 NewFogL 启动器的核心引擎，由 C++ 启动器以独立进程调用。
+
+职责范围：
+
+	· 扫描 mod 源目录，解析元数据，判定加载器归属
+	· 执行五道红线静态预检
+	· 构建依赖图，拓扑排序，处理循环依赖
+	· 部署模组到部署区，按规则重命名
+	· 规划沙盒，隔离三大加载器
+		· 生成游戏启动脚本
+	· 拉起 Java 17 游戏进程
+	· 输出日志和状态回传
+
+不负责：
+
+	· UI 界面
+	· 进程守护
+	· 崩溃检测
+	· 导出/导入整合包
+	· Junction 创建（由启动器负责）
+	· 内嵌资源释放（由启动器负责）
+
+
+================================================================================
+第二部分  Java 版本分工
+================================================================================
+
+进程						Java 版本	用途
+------------------------	----------	--------------------------------
+NewFogL.exe (C++)			—			启动器 UI 与进程管理
+newfog-loader.jar			Java 21		扫描/预检/部署/沙盒规划
+游戏进程						Java 17		运行 Minecraft 1.20.1
+
+
+调用链：
+
+	NewFogL.exe
+		│
+		│ 使用 jre-21 拉起加载器
+		▼
+	java.exe (jre-21) -jar newfog-loader.jar --instance ...
+		│
+		│ 加载器执行完预检/部署后，使用 jre-17 拉起游戏
+		▼
+	java.exe (jre-17) net.minecraft.client.main.Main --gameDir ...
+
+
+关键约束：
+
+	· 加载器自身运行在 Java 21 上
+	· 加载器通过 ProcessBuilder 拉起游戏进程
+	· 游戏进程使用 Java 17
+	· 两个 Java 版本内嵌在 exe 中，运行时释放到 .minecraft\runtime\
+
+
+================================================================================
+第三部分  项目结构
+================================================================================
+
+newfog-loader/
+│
+├── build.gradle.kts
+├── settings.gradle.kts
+│
+└── src/
+	├── main/
+	│	├── java/
+	│	│	└── com/newfogl/loader/
+	│	│		├── Main.java
+	│	│		│
+	│	│		├── model/                       # 数据模型
+	│	│		│	├── ModDescriptor.java
+	│	│		│	├── Dependency.java
+	│	│		│	├── LoaderTag.java
+	│	│		│	├── ModIdentifier.java
+	│	│		│	├── DeployManifest.java
+	│	│		│	└── ArbitrationRules.java
+	│	│		│
+	│	│		├── scanner/                     # 扫描器
+	│	│		│	├── MetadataScanner.java
+	│	│		│	├── FabricParser.java
+	│	│		│	├── ForgeParser.java
+	│	│		│	├── NeoForgeParser.java
+	│	│		│	├── LoaderDetector.java
+	│	│		│	└── ForbiddenCompatChecker.java
+	│	│		│
+	│	│		├── preflight/                   # 静态预检
+	│	│		│	├── PreFlightChecker.java
+	│	│		│	├── MultiVersionChecker.java
+	│	│		│	├── CrossLoaderChecker.java
+	│	│		│	├── DependencyChecker.java
+	│	│		│	├── SkinModChecker.java
+	│	│		│	├── DuplicateChecker.java
+	│	│		│	└── FatalArbitrationError.java
+	│	│		│
+	│	│		├── resolver/                    # 依赖解析
+	│	│		│	├── DependencyGraph.java
+	│	│		│	├── TopologicalSorter.java
+	│	│		│	├── TarjanSCC.java
+	│	│		│	├── CycleGroupResolver.java
+	│	│		│	└── LoaderPrioritySorter.java
+	│	│		│
+	│	│		├── deploy/                      # 部署
+	│	│		│	├── ModDeployer.java
+	│	│		│	├── FileLinker.java
+	│	│		│	├── FingerprintGenerator.java
+	│	│		│	├── CacheValidator.java
+	│	│		│	└── DeployManifestWriter.java
+	│	│		│
+	│	│		├── sandbox/                     # 沙盒规划
+	│	│		│	├── SandboxPlanner.java
+	│	│		│	├── NewFogSandboxClassLoader.java
+	│	│		└── SharedLibraryResolver.java
+		│	│		│
+		│	│		├── launcher/                    # 启动脚本与游戏进程
+		│	│		│	├── LaunchPlanWriter.java
+		│	│		│	├── ScriptGenerator.java
+		│	│		│	├── JvmArgsBuilder.java
+		│	│		│	├── GameProcessLauncher.java
+		│	│		│	└── GameOptionsInitializer.java
+		│	│		│
+	│	│		└── log/                         # 日志
+	│	│			├── NewFogLogger.java
+	│	│			├── LogLevel.java
+	│	│			├── LogModule.java
+	│	│			└── LogRotator.java
+	│	│
+	│	└── resources/
+	│		└── templates/
+	│			└── start-script.bat.template
+	│
+	└── test/
+		└── java/
+			└── com/newfogl/loader/
+				├── scanner/
+				├── preflight/
+				├── resolver/
+				└── deploy/
+
+
+================================================================================
+第四部分  build.gradle.kts 关键配置
+================================================================================
+
+java {
+	toolchain {
+		languageVersion.set(JavaLanguageVersion.of(21))
+	}
+	sourceCompatibility = JavaVersion.VERSION_21
+	targetCompatibility = JavaVersion.VERSION_21
+}
+
+dependencies {
+	implementation("com.electronwill.night-config:toml:3.6.7")
+	implementation("com.google.code.gson:gson:2.10.1")
+	implementation("org.ow2.asm:asm:9.6")
+	implementation("org.ow2.asm:asm-tree:9.6")
+	implementation("org.ow2.asm:asm-commons:9.6")
+}
+
+
+说明：
+
+	· 加载器用 Java 21 编译，字节码目标 21
+	· 不需要兼容 17
+	· 加载器运行在 jre-21 上
+	· 游戏进程由加载器用 jre-17 拉起
+
+
+================================================================================
+第五部分  数据模型
+================================================================================
+
+--------------------------------------------------------------------------------
+5.1  ModDescriptor（模组描述符）
+--------------------------------------------------------------------------------
+
+字段				类型				说明
+----------------	----------------	----------------------------------
+jarFileName			字符串				原始 jar 文件名
+modId				字符串				模组 ID
+version				字符串				模组版本
+displayName			字符串				显示名
+loaderType			LoaderTag			FORGE / NEOFORGE / FABRIC / UNKNOWN
+shortId				字符串				短编号（如 F-001）
+featureTags			集合<字符串>		功能标签
+hardDeps			列表<Dependency>	硬依赖
+softDeps			列表<Dependency>	软依赖
+conflicts			列表<字符串>		冲突声明
+fileHash			字符串				SHA-256 哈希
+bundledModIds		集合<字符串>		本 mod 通过 jar-in-jar 捆绑的嵌套 modId
+
+
+--------------------------------------------------------------------------------
+5.2  Dependency（依赖）
+--------------------------------------------------------------------------------
+
+字段				类型				说明
+----------------	----------------	----------------------------------
+modId				字符串				依赖的模组 ID
+versionRange		字符串				版本范围（如 >=0.92.0）
+mandatory			布尔值				是否硬依赖
+side				字符串				BOTH / CLIENT / SERVER
+
+
+--------------------------------------------------------------------------------
+5.3  LoaderTag（加载器标签）
+--------------------------------------------------------------------------------
+
+枚举值		说明
+----------	--------------------------------
+FORGE		Forge 加载器
+NEOFORGE	NeoForge 加载器
+FABRIC		Fabric 加载器
+UNKNOWN		无法判定归属
+
+
+--------------------------------------------------------------------------------
+5.4  ModIdentifier（模组标识）
+--------------------------------------------------------------------------------
+
+字段				类型				说明
+----------------	----------------	----------------------------------
+longId				字符串				全局长 ID（如 forge:jei）
+shortId				字符串				短编号（如 F-001）
+descriptor			ModDescriptor		关联的描述符
+
+
+--------------------------------------------------------------------------------
+5.5  DeployManifest（部署清单）
+--------------------------------------------------------------------------------
+
+结构：
+
+	{
+		"mappings": [
+			{
+				"source": "mods\\工业时代\\mods\\jei-15.2.0-forge.jar",
+				"target": "cache\\工业时代\\mods-deployed\\F001_jei.jar",
+				"loader": "FORGE",
+				"shortId": "F-001",
+				"modId": "jei",
+				"hash": "b2c4f1..."
+			}
+		]
+	}
+
+
+--------------------------------------------------------------------------------
+5.6  ArbitrationRules（仲裁规则缓存）
+--------------------------------------------------------------------------------
+
+结构：
+
+	{
+		"fingerprint": "a3f8c2e1b9d4...",
+		"generatedAt": "2026-10-15T12:00:00Z",
+		"modCount": 47,
+		"loaderPriority": ["FORGE", "NEOFORGE", "FABRIC"],
+		"shortIdMap": {
+			"forge:jei": "F-001",
+			"fabric:sodium": "B-015"
+		}
+	}
+
+
+================================================================================
+第六部分  扫描器
+================================================================================
+
+--------------------------------------------------------------------------------
+6.1  MetadataScanner（元数据扫描器）
+--------------------------------------------------------------------------------
+
+入口方法：
+
+	scan(Path modsDir) → List<ModDescriptor>
+
+流程：
+
+	1. 递归遍历 modsDir 下所有文件
+	2. 过滤 .jar 后缀，排除 .disabled
+	3. 对每个 jar：
+		a. 打开 ZipFile
+		b. 调用 LoaderDetector 判定加载器归属
+		c. 调用对应的 Parser 解析元数据
+		d. 封装为 ModDescriptor
+	4. 返回结果列表
+
+异常处理：
+
+	· ZipFile 打不开 → 记录 WARN，跳过该文件
+	· 元数据解析失败 → 记录 WARN，标记为 UNKNOWN
+	· 读取权限不足 → 记录 ERROR，抛出异常
+
+日志输出：
+
+	[INFO] [Scanner] 开始扫描: {modsDir}
+	[INFO] [Scanner] 发现 {n} 个 jar 文件
+	[DEBUG] [Scanner] 解析: {jarFileName} → modid={modId}
+	[INFO] [Scanner] 解析完成，{n} 个 ModDescriptor
+
+
+--------------------------------------------------------------------------------
+6.2  LoaderDetector（加载器判定）
+--------------------------------------------------------------------------------
+
+判定优先级（严格顺序）：
+
+	1. 存在 META-INF/neoforge.mods.toml → NEOFORGE
+	2. 存在 fabric.mod.json → FABRIC
+	3. 存在 META-INF/mods.toml → 二次判定：
+		a. 文件内容含 "neoforge" → NEOFORGE
+		b. 否则 → FORGE
+	4. 无任何元数据 → UNKNOWN
+
+伪代码：
+
+	LoaderTag detect(Path jarPath) {
+		ZipFile zip = openZip(jarPath);
+		if (zip.contains("META-INF/neoforge.mods.toml")) {
+			return NEOFORGE;
+		}
+		if (zip.contains("fabric.mod.json")) {
+			return FABRIC;
+		}
+		if (zip.contains("META-INF/mods.toml")) {
+			String content = readEntry(zip, "META-INF/mods.toml");
+			if (content.contains("neoforge")) return NEOFORGE;
+			return FORGE;
+		}
+		return UNKNOWN;
+	}
+
+
+--------------------------------------------------------------------------------
+6.3  FabricParser（Fabric 元数据解析器）
+--------------------------------------------------------------------------------
+
+解析文件：fabric.mod.json
+
+提取字段：
+
+	· id			→ modId
+	· version		→ version
+	· name			→ displayName
+	· depends		→ hardDeps
+	· recommends	→ softDeps
+	· conflicts		→ conflicts
+
+依赖格式：
+
+	JSON 对象，key 为 modId，value 为版本范围字符串
+	如："fabric-api": ">=0.92.0"
+
+示例：
+
+	{
+		"id": "sodium",
+		"version": "0.5.8",
+		"name": "Sodium",
+		"depends": {
+			"fabricloader": ">=0.15.0",
+			"fabric-api": "*",
+			"minecraft": "1.20.1"
+		}
+	}
+
+
+--------------------------------------------------------------------------------
+6.4  ForgeParser / NeoForgeParser
+--------------------------------------------------------------------------------
+
+解析文件：META-INF/mods.toml 或 META-INF/neoforge.mods.toml
+
+提取字段：
+
+	· modId			→ modId
+	· version		→ version
+	· displayName	→ displayName
+	· dependencies	→ hardDeps / softDeps
+	· 读取 META-INF/jarjar/ 下的嵌套 jar，提取其 modId
+
+依赖格式：
+
+	[[dependencies.xxx]]
+		modId = "forge"
+		mandatory = true
+		versionRange = "[47.0.0,)"
+		ordering = "NONE"
+		side = "BOTH"
+
+	mandatory = true  → hardDeps
+	mandatory = false → softDeps
+	side = SERVER     → 忽略（只做客户端）
+
+示例：
+
+	modLoader = "javafml"
+	loaderVersion = "[47,)"
+	license = "LGPL"
+
+	[[mods]]
+		modId = "jei"
+		version = "15.2.0"
+		displayName = "Just Enough Items"
+
+	[[dependencies.jei]]
+		modId = "forge"
+		mandatory = true
+		versionRange = "[47.0.0,)"
+		ordering = "NONE"
+		side = "BOTH"
+
+
+--------------------------------------------------------------------------------
+6.5  ForbiddenCompatChecker（缝合怪检测）
+--------------------------------------------------------------------------------
+
+规则：
+
+	· Forge / NeoForge 的模组，依赖列表含 fabric-api / fabric / fabricloader → 拦截
+	· LoaderTag.FABRIC 的模组，依赖列表含 forge / neoforge → 拦截
+	· 依赖列表含 sinytra_connector / forgified-fabric-api → 拦截
+
+输出：
+
+	FatalArbitrationError("CrossLoader", 详细信息, 涉及模组列表)
+
+日志示例：
+
+	[ERROR] [Scanner] CrossLoader: 模组 xxx 是 FORGE 模组，但依赖 fabric-api
+	[ERROR] [Scanner] 涉及模组: xxx-forge-1.0.jar
+
+
+================================================================================
+第七部分  静态预检
+================================================================================
+
+--------------------------------------------------------------------------------
+7.1  PreFlightChecker（主预检器）
+--------------------------------------------------------------------------------
+
+入口方法：
+
+	check(List<ModDescriptor> mods) → PreFlightResult
+
+执行顺序（五道红线，顺序不能变）：
+
+	1. MultiVersionChecker
+	2. CrossLoaderChecker
+	3. DependencyChecker
+	4. SkinModChecker
+	5. DuplicateChecker
+
+任一道触发 → 抛出 FatalArbitrationError，中止预检
+
+日志输出：
+
+	[INFO] [PreFlight] 开始静态预检
+	[INFO] [PreFlight] 多版本拦截: 通过
+	[INFO] [PreFlight] 缝合怪拦截: 通过
+	[INFO] [PreFlight] 依赖模糊拦截: 通过
+	[INFO] [PreFlight] 套壳模组拦截: 通过
+	[INFO] [PreFlight] 跨加载器重复拦截: 通过
+	[INFO] [PreFlight] 静态预检通过
+
+
+--------------------------------------------------------------------------------
+7.2  红线1：MultiVersionChecker（多版本拦截）
+--------------------------------------------------------------------------------
+
+触发条件：
+
+	同一加载器下，同 modid 出现多个版本
+
+检测逻辑：
+
+	Map<String, List<ModDescriptor>> groupByLoaderAndModId;
+	for (ModDescriptor mod : allMods) {
+		String key = mod.getLoaderType() + ":" + mod.getModId();
+		groupByLoaderAndModId.computeIfAbsent(key, k -> new ArrayList<>())
+							  .add(mod);
+	}
+	for (entry : groupByLoaderAndModId) {
+		if (entry.getValue().size() > 1) {
+			throw FatalArbitrationError;
+		}
+	}
+
+弹窗标题：检测到多版本模组
+
+弹窗内容：
+
+	模组 {modid} 存在多个版本：
+	- sodium-0.5.8.jar
+	- sodium-0.6.0.jar
+	请移除多余版本后重试。
+
+日志示例：
+
+	[ERROR] [PreFlight] MultiVersion: sodium 存在多个版本
+	[ERROR] [PreFlight] 涉及模组: sodium-0.5.8.jar, sodium-0.6.0.jar
+
+
+--------------------------------------------------------------------------------
+7.3  红线2：CrossLoaderChecker（缝合怪拦截）
+--------------------------------------------------------------------------------
+
+触发条件：
+
+	Forge 模组依赖 Fabric API，或反之
+
+检测逻辑：
+
+	· loaderType == FORGE 且依赖列表含 fabric-api → 拦截
+	· loaderType == FABRIC 且依赖列表含 forge / neoforge → 拦截
+	· 依赖列表含 sinytra_connector / forgified-fabric-api → 拦截
+
+弹窗标题：检测到违禁的跨加载器兼容层
+
+弹窗内容：
+
+	模组 {filename} 是 {loader} 模组，但依赖了 {otherLoader} API。
+	NewFogL 严禁此类缝合模组，请移除。
+
+日志示例：
+
+	[ERROR] [PreFlight] CrossLoader: 模组 xxx 是 FORGE 模组，但依赖 fabric-api
+	[ERROR] [PreFlight] 涉及模组: xxx-forge-1.0.jar
+
+
+--------------------------------------------------------------------------------
+7.4  红线3：DependencyChecker（依赖模糊拦截）
+--------------------------------------------------------------------------------
+
+触发条件：
+
+	· loaderType == UNKNOWN（无法判定加载器归属）
+	· 元数据解析失败
+	· 缺少硬依赖
+	· 硬依赖版本范围不匹配
+
+检测逻辑：
+
+	对每个 mod 的 hardDeps：
+		查找本地是否有对应 modId
+		不存在 → 拦截
+		存在但版本不匹配 → 拦截
+	跳过规则：
+		· 当前 mod 的硬依赖，如果在自己或其他 mod 的 bundledModIds 里 → 跳过
+		· modId 以 "fabric-" 开头的，视作 Fabric API 子模块 → 跳过
+
+弹窗标题：依赖解析失败
+
+弹窗内容：
+
+	模组 {modid} 依赖 {depId} 版本 {versionRange}，
+	但本地未找到匹配版本。
+	请安装对应依赖后重试。
+
+日志示例：
+
+	[ERROR] [PreFlight] DependencyMissing: create 需要 flywheel >= 0.6.0
+	[ERROR] [PreFlight] 涉及模组: create-1.20.1-0.5.1.f.jar
+
+
+--------------------------------------------------------------------------------
+7.5  红线4：SkinModChecker（套壳模组拦截）
+--------------------------------------------------------------------------------
+
+触发条件：
+
+	字节码相似度 > 85% 且 modId 不同（仅同加载器内比较）
+
+检测逻辑：
+
+	1. 提取每个 jar 里所有 .class 文件的 SHA-256 集合
+	2. 计算两两之间的 Jaccard 相似度：
+		相似度 = |A ∩ B| / |A ∪ B|
+	3. 相似度 > 0.85 且 modId 不同 → 拦截
+
+缓存优化：
+
+	· 首次扫描时计算特征码，写入缓存
+	· 后续启动只对新增/修改的 jar 重算
+	· 缓存文件：{cacheDir}/skinmod-cache.txt（缓存键：jar 文件大小_修改时间）
+
+弹窗标题：检测到套壳模组
+
+弹窗内容：
+
+	{modA} 和 {modB} 的字节码相似度达 {percent}%，功能高度重叠。
+	请保留其中一个。
+
+日志示例：
+
+	[WARN] [PreFlight] FakeMod: sodium 和 rubidium 字节码相似度 92%
+	[WARN] [PreFlight] 涉及模组: sodium-0.5.8.jar, rubidium-0.6.0.jar
+
+
+--------------------------------------------------------------------------------
+7.6  红线5：DuplicateChecker（跨加载器重复拦截）
+--------------------------------------------------------------------------------
+
+触发条件：
+
+	同一 modid 出现在多个加载器中
+
+检测逻辑：
+
+	Map<String, Set<LoaderTag>> modIdToLoaders;
+	for (ModDescriptor mod : allMods) {
+		modIdToLoaders.computeIfAbsent(mod.getModId(), k -> new HashSet<>())
+					  .add(mod.getLoaderType());
+	}
+	for (entry : modIdToLoaders) {
+		if (entry.getValue().size() > 1) {
+			throw FatalArbitrationError;
+		}
+	}
+
+白名单（跳过检查）：
+
+	forge, neoforge, fabricloader, fabric-api, fabric,
+	minecraft, java, mcp, mixin, architectury, cloth-config
+
+弹窗标题：同一模组存在于多个加载器
+
+弹窗内容：
+
+	模组 {modid} 同时存在于多个加载器中：
+	- FORGE: sodium-forge-0.5.8.jar
+	- FABRIC: sodium-fabric-0.5.8.jar
+	请保留其中一个加载器的版本。
+
+日志示例：
+
+	[ERROR] [PreFlight] CrossDuplicate: sodium 同时存在于 FORGE 和 FABRIC
+	[ERROR] [PreFlight] 涉及模组: sodium-forge-0.5.8.jar, sodium-fabric-0.5.8.jar
+
+
+--------------------------------------------------------------------------------
+7.7  FatalArbitrationError（统一异常）
+--------------------------------------------------------------------------------
+
+字段：
+
+	· redLine		字符串			红线名称
+	· affectedMods	列表<字符串>	涉及的模组
+	· userMessage	字符串			用户可见的提示
+	· logMessage	字符串			日志记录的消息
+
+构造方法：
+
+	FatalArbitrationError(
+		String redLine,
+		String userMessage,
+		List<String> affectedMods
+	)
+
+抛出行为：
+
+	· 写入 ERROR 日志
+	· 写入 [STATE] ABORT <原因>
+	· 设置退出码为 1
+	· 立即中止启动
+
+
+================================================================================
+第八部分  依赖解析
+================================================================================
+
+--------------------------------------------------------------------------------
+8.1  DependencyGraph（依赖图）
+--------------------------------------------------------------------------------
+
+节点：所有 ModDescriptor（用短编号标识）
+边：如果 A 硬依赖 B，则添加边 B → A（B 必须先加载）
+
+只考虑硬依赖，软依赖不参与拓扑排序。
+
+数据结构：
+
+	class DependencyGraph {
+		Map<String, Set<String>> adjacency;    // 节点 → 后继
+		Map<String, Integer> inDegree;         // 节点 → 入度
+		
+		void addNode(String shortId);
+		void addEdge(String from, String to);
+		Set<String> getSuccessors(String node);
+		Set<String> getAllNodes();
+		int getInDegree(String node);
+		void decreaseInDegree(String node);
+	}
+
+构建流程：
+
+	for (ModDescriptor mod : allMods) {
+		graph.addNode(mod.getShortId());
+		for (Dependency dep : mod.getHardDeps()) {
+			ModDescriptor depMod = findModByModId(dep.getModId());
+			if (depMod != null) {
+				graph.addEdge(depMod.getShortId(), mod.getShortId());
+			}
+		}
+	}
+
+
+--------------------------------------------------------------------------------
+8.2  TopologicalSorter（拓扑排序）
+--------------------------------------------------------------------------------
+
+算法：Kahn 算法（基于入度的 BFS）
+
+流程：
+
+	1. 遍历所有节点，把入度为 0 的节点入队
+	2. 依次出队：加入结果列表，对其每个后继的入度减 1
+	3. 后继入度变为 0 时入队
+	4. 重复直到队列为空
+	5. 结果数量 < 节点总数 → hasCycle = true，交由 TarjanSCC 处理
+
+入口方法：
+
+	sort(DependencyGraph graph) → Result
+
+Result 结构：
+
+	class Result {
+		List<String> sorted;    // 排序后的短编号有序列表
+		boolean hasCycle;       // 是否存在环
+	}
+
+伪代码：
+
+	public static Result sort(DependencyGraph graph) {
+		List<String> result = new ArrayList<>();
+		Queue<String> queue = new LinkedList<>();
+
+		// 1. 所有入度为 0 的节点先入队
+		for (String node : graph.getAllNodes()) {
+			if (graph.getInDegree(node) == 0) {
+				queue.offer(node);
+			}
+		}
+
+		// 2. BFS 遍历
+		while (!queue.isEmpty()) {
+			String current = queue.poll();
+			result.add(current);
+
+			for (String next : graph.getSuccessors(current)) {
+				graph.decreaseInDegree(next);
+				if (graph.getInDegree(next) == 0) {
+					queue.offer(next);
+				}
+			}
+		}
+
+		// 3. 结果数量 < 节点总数 → 有环
+		boolean hasCycle = result.size() != graph.size();
+		return new Result(result, hasCycle);
+	}
+
+说明：
+
+	· 本方法不再抛 CircularDependencyException，而是通过 Result.hasCycle 返回"是否有环"
+	· 是否进入 TarjanSCC 由调用方（Main 阶段4）依据 hasCycle 决定，不在本类内处理
+
+日志输出：
+
+	[INFO] [Resolver] 构建依赖图，共 {n} 个节点
+	[INFO] [Resolver] 拓扑排序完成，共 {n} 个节点
+
+
+--------------------------------------------------------------------------------
+8.3  TarjanSCC（强连通分量）
+--------------------------------------------------------------------------------
+
+用途：识别循环依赖组
+
+算法：Tarjan 强连通分量
+
+流程：
+
+	index = 0
+	stack = []
+	for each node in graph:
+		if node.index is undefined:
+			strongConnect(node)
+	
+	function strongConnect(v):
+		v.index = index
+		v.lowlink = index
+		index++
+		stack.push(v)
+		v.onStack = true
+		
+		for each w in v.successors:
+			if w.index is undefined:
+				strongConnect(w)
+				v.lowlink = min(v.lowlink, w.lowlink)
+			else if w.onStack:
+				v.lowlink = min(v.lowlink, w.index)
+		
+		if v.lowlink == v.index:
+			component = []
+			repeat:
+				w = stack.pop()
+				w.onStack = false
+				component.add(w)
+			until w == v
+			if component.size > 1:
+				cycleGroups.add(component)
+
+输出：List<List<String>>（环组列表）
+
+日志输出：
+
+	[INFO] [Resolver] 检测到 {n} 个循环依赖组
+	[INFO] [Resolver] 环组 [CG-001] 包含: F-001, B-005
+
+
+--------------------------------------------------------------------------------
+8.4  CycleGroupResolver（环组处理）
+--------------------------------------------------------------------------------
+
+对每个环组：
+
+	1. 合并为超级节点 [ABC]
+	2. 环组内部并行加载主类
+	3. 环组内部按短编号软排序初始化
+	4. 环组作为原子单元参与后续排序
+
+说明：
+
+	· 环组处理不中止启动，而是作为特殊单元处理
+	· 环组内部初始化顺序按短编号字典序
+	· 环组内跨加载器情况按模组数量最多的加载器构建沙盒
+
+日志输出：
+
+	[INFO] [Resolver] 环组 [CG-001] 并行加载中...
+	[INFO] [Resolver] 环组 [CG-001] 初始化顺序: F-001 → B-005
+	[INFO] [Resolver] 环组 [CG-001] 加载完毕
+
+
+--------------------------------------------------------------------------------
+8.5  LoaderPrioritySorter（加载器优先级）
+--------------------------------------------------------------------------------
+
+统计数量：
+
+	按加载器标签统计 Forge、NeoForge、Fabric 的模组数量
+
+动态排序：
+
+	数量多的加载器优先
+
+数量相同时兜底：
+
+	Forge > NeoForge > Fabric
+
+用途：
+
+	决定沙盒创建顺序和同层模组加载顺序
+
+日志输出：
+
+	[INFO] [Resolver] 加载器统计: FORGE={n}, NEOFORGE={n}, FABRIC={n}
+	[INFO] [Resolver] 加载器优先级: [FORGE, NEOFORGE, FABRIC]
+
+
+================================================================================
+第九部分  部署
+================================================================================
+
+--------------------------------------------------------------------------------
+9.1  FingerprintGenerator（指纹生成）
+--------------------------------------------------------------------------------
+
+对每个 jar：
+
+	1. 计算 SHA-256
+	2. 记录：短编号 + 文件名 + 哈希 + 大小 + 修改时间
+
+排序：
+
+	按短编号字典序
+
+拼接：
+
+	所有条目拼接成字符串
+
+总指纹：
+
+	对拼接串再计算一次 SHA-256
+
+伪代码：
+
+	String generate(List<ModDescriptor> mods) {
+		mods.sort(Comparator.comparing(ModDescriptor::getShortId));
+		StringBuilder sb = new StringBuilder();
+		for (ModDescriptor mod : mods) {
+			sb.append(mod.getShortId()).append(":")
+			  .append(mod.getVersion()).append(":")
+			  .append(mod.getFileHash()).append(";");
+		}
+		return sha256(sb.toString());
+	}
+
+
+--------------------------------------------------------------------------------
+9.2  CacheValidator（缓存校验）
+--------------------------------------------------------------------------------
+
+读取路径（以启动器传入的 cacheDir 为基目录，用 Path.resolve 拼接，路径分隔符为 /）：
+
+	{cacheDir}/newfog-fingerprint.sha256
+
+说明：
+
+	· 代码不写死 NewFogL 前缀，只拼接文件名 newfog-fingerprint.sha256
+	· cacheDir 由启动器传入，对应 .minecraft 下的 NewFogL/cache/{实例名}
+
+判定：
+
+	· 文件不存在 → 需要全量部署
+	· 文件存在且指纹一致 → 跳过部署
+	· 文件存在但指纹不一致 → 需要重新部署
+
+日志输出：
+
+	[INFO] [Deploy] 计算指纹: {fingerprint}
+	[INFO] [Deploy] 缓存指纹: {cachedFingerprint}
+	[INFO] [Deploy] 指纹一致，跳过部署
+
+
+--------------------------------------------------------------------------------
+9.3  ModDeployer（部署器）
+--------------------------------------------------------------------------------
+
+入口方法：
+
+	deploy(List<ModDescriptor> mods, Path cacheDir) → Result
+
+流程：
+
+	1. 清理旧部署区（递归删除，保留空目录）
+	2. 对每个 mod：
+		a. 生成新文件名：[F/N/B][编号]_[modid].jar
+		b. 源路径：mods-dir/{原文件名}
+		c. 目标路径：cacheDir/mods-deployed/{新文件名}
+		d. 优先硬链接，失败降级复制
+	3. 写入 deploy-manifest.json
+
+日志输出：
+
+	[INFO] [Deploy] 开始部署: {n} 个模组
+	[DEBUG] [Deploy] 部署: jei-15.2.0-forge.jar → F001_jei.jar
+	[INFO] [Deploy] 部署完成: {n} 个文件
+
+
+--------------------------------------------------------------------------------
+9.4  FileLinker（文件链接）
+--------------------------------------------------------------------------------
+
+硬链接：
+
+	Files.createLink(target, source)
+
+降级条件：
+
+	· 跨盘符
+	· 非 NTFS 文件系统
+	· 权限不足
+	· 目标已存在
+
+降级行为：
+
+	Files.copy(source, target, REPLACE_EXISTING)
+
+日志输出：
+
+	[DEBUG] [Deploy] 硬链接: {source} → {target}
+	[WARN] [Deploy] 硬链接失败，降级复制: {reason}
+
+
+--------------------------------------------------------------------------------
+9.5  DeployManifestWriter（清单写入）
+--------------------------------------------------------------------------------
+
+输出路径（以启动器传入的 cacheDir 为基目录，用 Path.resolve 拼接，路径分隔符为 /）：
+
+	{cacheDir}/deploy-manifest.json
+
+结构：
+
+	{
+		"mappings": [
+			{
+				"source": "mods\\工业时代\\mods\\jei-15.2.0-forge.jar",
+				"target": "cache\\工业时代\\mods-deployed\\F001_jei.jar",
+				"loader": "FORGE",
+				"shortId": "F-001",
+				"modId": "jei",
+				"hash": "b2c4f1..."
+			}
+		]
+	}
+
+
+================================================================================
+第十部分  沙盒规划（三加载器共存与核心引导层当前版本未实现）
+================================================================================
+
+--------------------------------------------------------------------------------
+10.1  SandboxPlanner（沙盒规划器）
+--------------------------------------------------------------------------------
+
+入口方法：
+
+	plan(List<ModDescriptor> mods) → List<SandboxPlan>
+
+流程：
+
+	1. 按加载器分组
+	2. 为每个加载器创建一个沙盒
+	3. 标记每个沙盒的：
+		· 私有库（加载器核心）
+		· 共享库（跨加载器）
+		· 模组列表（按拓扑排序）
+
+SandboxPlan 结构：
+
+	class SandboxPlan {
+		LoaderTag loader;
+		String classLoaderName;
+		List<String> sharedLibs;
+		List<String> privateLibs;
+		List<String> mods;    // 短编号列表
+	}
+
+日志输出：
+
+	[INFO] [Arbiter] 沙盒规划完成
+	[INFO] [Arbiter] 沙盒 [NewFogSandboxClassLoader-Forge-1]: {n} 个模组
+
+
+--------------------------------------------------------------------------------
+10.2  NewFogSandboxClassLoader（沙盒类加载器）
+--------------------------------------------------------------------------------
+
+类加载层级：
+
+	Bootstrap ClassLoader
+		↑
+	Platform ClassLoader
+		↑
+	App ClassLoader
+		↑
+	Minecraft 原版类加载器
+		↑
+	Loader 核心类加载器
+		↑
+	【沙盒隔离墙】
+		↑
+	前置库类加载器
+		↑
+	模组类加载器
+
+命名规则：
+
+	NewFogSandboxClassLoader-Forge-1
+	NewFogSandboxClassLoader-NeoForge-1
+	NewFogSandboxClassLoader-Fabric-1
+
+加载策略：
+
+	· 优先从本沙盒加载
+	· 找不到时委托给父加载器
+	· 核心类（net.minecraft.*）由父加载器加载
+	· 模组私有类由沙盒加载
+
+
+--------------------------------------------------------------------------------
+10.3  SharedLibraryResolver（共享库解析）
+--------------------------------------------------------------------------------
+
+跨加载器共享库：
+
+	Architectury、Mixin 等
+
+处理方式：
+
+	放在父加载器，让所有沙盒子加载器都能访问同一份
+
+版本敏感库：
+
+	不同沙盒需要不同版本的库，各自在沙盒内加载
+
+判断标准：
+
+	· 元数据里被多个加载器的模组硬依赖 → 共享库
+	· 只被单个加载器依赖 → 沙盒私有库
+
+
+================================================================================
+第十二部分  启动脚本生成与游戏拉起
+================================================================================
+
+--------------------------------------------------------------------------------
+12.0  LaunchPlanWriter（启动计划写入）
+--------------------------------------------------------------------------------
+
+	职责：
+		· 把沙盒规划、加载顺序、Java 路径、脚本路径写成 newfog-rules.json
+		· 输出到 {cacheDir}/newfog-rules.json
+		· 供启动器侧读取
+
+	不负责：
+		· 生成沙盒（由 SandboxPlanner 负责）
+		· 生成加载顺序（由 TopologicalSorter 负责）
+		· 生成脚本（由 ScriptGenerator 负责）
+
+	输出结构（对齐 02 号接口文档 5.2 节）：
+		{
+			"instanceName": "...",
+			"gameVersion": "1.20.1",
+			"loader": "mixed",
+			"loaderVersion": "mixed",
+			"javaVersion": 17,
+			"javaPath": "...",
+			"scriptPath": "...",
+			"sandboxes": [...],
+			"loadOrder": [...],
+			"cycleGroups": [...],
+			"shortIdMap": {...}
+		}
+
+	说明：
+		· loader 和 loaderVersion 填 "mixed"，表示三加载器混装
+		· 原有 12.1 / 12.2 / 12.3 编号不变
+
+
+--------------------------------------------------------------------------------
+12.1  ScriptGenerator（脚本生成器）
+--------------------------------------------------------------------------------
+
+输出路径：
+
+	NewFogL\scripts\{实例名}.bat
+
+编码：
+
+	UTF-8 无 BOM
+
+流程：
+
+	1. 读取 instance.json 的 javaPath、maxMemory、minMemory、jvmArgs
+	2. 读取 newfog-rules.json 的 sandboxes
+	3. 渲染脚本模板
+	4. 写入文件
+
+日志输出：
+
+	[INFO] [Launcher] 生成启动脚本: {scriptPath}
+
+
+--------------------------------------------------------------------------------
+12.2  JvmArgsBuilder（JVM 参数组装）
+--------------------------------------------------------------------------------
+
+组装顺序：
+
+	1. 内存参数：-Xmx、-Xms
+	2. GC 参数：-XX:+UseG1GC
+	3. 编码参数：-Dfile.encoding=UTF-8
+	4. 配置重定向：-Dfabric.config.dir 等
+	5. 用户自定义参数：instance.json 的 jvmArgs
+	6. 类路径：-cp
+
+示例输出：
+
+	-Xmx8G
+	-Xms4G
+	-XX:+UseG1GC
+	-Dfile.encoding=UTF-8
+	-Dfabric.config.dir="...configs"
+	-cp "...mods-deployed\*;..."
+
+
+--------------------------------------------------------------------------------
+12.3  GameProcessLauncher（游戏进程拉起）
+--------------------------------------------------------------------------------
+
+重要：游戏进程使用 Java 17，不是 Java 21。
+
+流程：
+
+	1. 读取 instance.json 的 javaPath
+		· javaPath 指向 runtime\jre-17\bin\java.exe
+	2. 构造 ProcessBuilder：
+		· 命令：javaPath
+		· 参数：从 JvmArgsBuilder 获取的完整参数
+		· 工作目录：versions\{实例名}\
+	3. 重定向 stdout/stderr
+	4. 启动进程
+	5. 等待进程退出
+	6. 读取退出码
+	7. 将退出码返回给 C++ 启动器
+
+返回给启动器的信息：
+
+	· 游戏进程退出码
+	· 最后 100 行游戏日志（可选）
+
+说明：
+
+	· 加载器本身运行在 Java 21
+	· 加载器通过 ProcessBuilder 拉起 Java 17 的游戏进程
+	· 两个 JVM 是父子进程关系
+	· 加载器退出前，游戏进程必须结束（或加载器不等游戏结束直接退出）
+
+日志输出：
+
+	[INFO] [Launcher] 游戏进程已启动，PID: {pid}
+	[INFO] [Launcher] 游戏进程退出，退出码: {code}
+
+
+--------------------------------------------------------------------------------
+12.4  进程树
+--------------------------------------------------------------------------------
+
+	NewFogL.exe (C++)
+		│
+		└── java.exe (jre-21)  ← 加载器
+				│
+				└── java.exe (jre-17)  ← 游戏
+
+
+	说明：
+	· 加载器完成预检/部署后，可以：
+		方案A：直接拉起游戏进程，等待游戏结束，然后把退出码返回给启动器
+		方案B：只生成启动脚本，立即退出，由启动器执行脚本
+	· 推荐方案A：加载器全程负责，启动器只需读取加载器退出码
+	· 方案A下加载器进程会持续存在，直到游戏退出
+
+
+--------------------------------------------------------------------------------
+12.5  脚本模板
+--------------------------------------------------------------------------------
+
+	@echo off
+	chcp 65001 >nul
+	title New FogL - {实例名}
+
+	set "NF_ROOT=%~dp0.."
+	set "INSTANCE={实例名}"
+	set "GAME_DIR=%NF_ROOT%\versions\%INSTANCE%"
+	set "MODS_DIR=%NF_ROOT%\NewFogL\cache\%INSTANCE%\mods-deployed"
+	set "CONFIG_DIR=%NF_ROOT%\NewFogL\cache\%INSTANCE%\configs"
+	set "JAVA=%NF_ROOT%\runtime\jre-17\bin\java.exe"
+
+	cd /d "%GAME_DIR%"
+
+	"%JAVA%" ^
+		{内存参数} ^
+		{GC参数} ^
+		{编码参数} ^
+		{配置重定向} ^
+		{用户参数} ^
+		-cp "{类路径}" ^
+		net.minecraft.client.main.Main ^
+		--gameDir "%GAME_DIR%" ^
+		--assetsDir "%NF_ROOT%\assets" ^
+		--version 1.20.1
+
+	if errorlevel 1 (
+		echo.
+		echo [NewFogL] 游戏异常退出，错误码: %errorlevel%
+		pause
+	)
+
+
+================================================================================
+第十三部分  日志系统
+================================================================================
+
+--------------------------------------------------------------------------------
+13.1  NewFogLogger
+--------------------------------------------------------------------------------
+
+输出目标：
+
+	· stdout（控制台）
+	· 日志文件
+
+格式：
+
+	[时间戳] [级别] [模块] 原始消息
+
+时间戳：
+
+	yyyy-MM-dd HH:mm:ss（精确到秒）
+
+级别：
+
+	DEBUG / INFO / WARN / ERROR / FATAL
+
+模块：
+
+	Scanner / PreFlight / Resolver / Arbiter / Deploy / Launcher / Game
+
+
+--------------------------------------------------------------------------------
+13.2  输出规则
+--------------------------------------------------------------------------------
+
+	· DEBUG 默认开启
+	· 所有模块的日志都写入文件
+	· stdout 输出所有模块的日志
+	· 游戏进程日志由加载器转发到 stdout
+
+
+--------------------------------------------------------------------------------
+13.3  LogRotator（日志轮转）
+--------------------------------------------------------------------------------
+
+规则：
+
+	· 单文件超过 10 MB → 自动切分
+	· 保留最近 5 个历史文件
+	· 命名：runtime.log → runtime-1.log → runtime-2.log → ……
+	· 超出 5 个的自动删除最旧的
+
+
+================================================================================
+第十四部分  Main 入口
+================================================================================
+
+--------------------------------------------------------------------------------
+14.1  流程
+--------------------------------------------------------------------------------
+
+	1. 解析命令行参数
+	2. 校验必填参数
+	3. 初始化日志系统
+	4. 输出 [INFO] [Launcher] New Fog Loader v1.0.0 (Java 21)
+	5. 读取 instance.json
+	6. 执行流程 B 的 10 个阶段：
+		· 阶段1：扫描 mods（解析元数据并判定加载器归属）
+		· 阶段2：分配短编号
+		· 阶段3：静态预检（五道红线）
+		· 阶段4：依赖解析（拓扑排序 + Tarjan SCC）
+		· 阶段5：加载器优先级
+		· 阶段6：沙盒规划
+		· 阶段7：指纹生成与缓存校验
+		· 阶段8：部署
+		· 阶段9：生成启动计划与启动脚本
+		· 阶段10：拉起游戏进程（Java 17）
+	7. 记录游戏进程退出码
+	8. 关闭日志
+	9. 正常结束（无异常时进程退出码为 0）
+
+
+--------------------------------------------------------------------------------
+14.2  异常处理
+--------------------------------------------------------------------------------
+
+	· FatalArbitrationError → 输出 ERROR 日志，退出码 1
+	· 其他 RuntimeException → 输出 ERROR 日志 + 堆栈，退出码 5
+	· 参数错误 → 输出 ERROR 日志，退出码 6
+	· 部署失败 → 输出 ERROR 日志，退出码 3
+	· 游戏拉起失败 → 输出 ERROR 日志，退出码 7
+
+
+--------------------------------------------------------------------------------
+14.3  退出码
+--------------------------------------------------------------------------------
+
+	退出码	含义
+	------	--------------------------------
+	0		加载器成功，游戏正常退出
+	1		静态预检失败
+	2		依赖解析失败
+	3		部署失败
+	4		沙盒规划失败
+	5		加载器内部错误
+	6		参数错误
+	7		游戏进程拉起失败
+
+
+================================================================================
+第十五部分  开发顺序
+================================================================================
+
+	1. 数据模型
+		· ModDescriptor
+		· Dependency
+		· LoaderTag
+		· ModIdentifier
+		· DeployManifest
+		· ArbitrationRules
+
+	2. 日志系统
+		· NewFogLogger
+		· LogLevel
+		· LogModule
+		· LogRotator
+
+	3. 扫描器
+		· MetadataScanner
+		· LoaderDetector
+		· FabricParser
+		· ForgeParser
+		· NeoForgeParser
+		· ForbiddenCompatChecker
+
+	4. 静态预检
+		· PreFlightChecker
+		· MultiVersionChecker
+		· CrossLoaderChecker
+		· DependencyChecker
+		· SkinModChecker
+		· DuplicateChecker
+		· FatalArbitrationError
+
+	5. 依赖解析
+		· DependencyGraph
+		· TopologicalSorter
+		· TarjanSCC
+		· CycleGroupResolver
+		· LoaderPrioritySorter
+
+	6. 部署
+		· FingerprintGenerator
+		· CacheValidator
+		· ModDeployer
+		· FileLinker
+		· DeployManifestWriter
+
+	7. 沙盒规划
+		· SandboxPlanner
+		· NewFogSandboxClassLoader
+		· SharedLibraryResolver
+
+	8. 启动脚本生成
+		· LaunchPlanWriter
+		· ScriptGenerator
+		· JvmArgsBuilder
+		· GameOptionsInitializer
+
+	9. GameProcessLauncher（Java 17 拉起游戏）
+
+	10. Main 入口与参数解析
+
+	11. 单元测试
+
+	12. 与启动器联调
+
+
+================================================================================
+第十六部分  变更记录
+================================================================================
+
+	1.1.0
+		· 文档版本 1.0.0 → 1.1.0，与 Java 代码（共 42 个 .java）对齐
+		· 14.1 修正 Main 的 10 阶段顺序：扫描→短编号→静态预检→依赖解析→加载器优先级→沙盒规划→指纹/缓存校验→部署→生成脚本→拉起进程
+		· 静态预检保持五道红线：MultiVersion → CrossLoader → Dependency → SkinMod → Duplicate，失败抛 FatalArbitrationError
+		· 第三部分项目结构补入 launcher/GameOptionsInitializer.java，launcher 包为 5 个文件
+		· 第十五部分开发顺序补入 GameOptionsInitializer
+		· 标注未实现设计：第十部分 三加载器共存与核心引导层
+		· 移除设计：离线皮肤功能（删除原第十一部分整章、skin/ 包、皮肤 JVM 参数与相关说法）
+		· 修正 6.2 LoaderDetector 二次判定为代码实际逻辑（mods.toml 内容含 "neoforge"）
+		· 修正 7.5 SkinModChecker 触发条件（同加载器内 modId 不同，非功能标签）与缓存文件名 skinmod-cache.txt
+		· 修正 6.5 缝合怪规则覆盖 NeoForge 且明确 fabric-api / fabric / fabricloader
+		· 核对一致（未改）：短编号 F-001/N-001/B-001、加载器优先级（数量多者优先、相同 Forge>NeoForge>Fabric）、部署命名 F001_jei.jar
+		· 清理残损文本：8.2 拓扑排序伪代码对齐 TopologicalSorter.java（Kahn 算法，返回 Result.hasCycle，不再抛 CircularDependencyException）；9.2 / 9.5 路径改为以 cacheDir 为基的正斜杠写法
+		· 9.3 ModDeployer 签名与代码统一：deploy(..., Path cacheDir) → Result，目标路径为 cacheDir/mods-deployed/
+
+	1.0.0
+		· 初始版本
+
+
+================================================================================
+（开发文档完整版结束）
+================================================================================

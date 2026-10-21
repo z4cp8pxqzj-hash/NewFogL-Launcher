@@ -1,0 +1,1852 @@
+```
+================================================================================
+NewFogL 启动器 开发文档
+================================================================================
+
+文档版本：1.2.0
+模块名称：NewFogL.exe
+语言：C++17
+运行环境：Windows 10 / 11（x64）
+构建工具：CMake
+编译器：MSVC
+UI 框架：Qt6（QApplication + MainWindow，纯自绘控件）
+
+
+================================================================================
+第一部分  模块概述
+================================================================================
+
+NewFogL 启动器是整个项目的"外壳"，负责 UI、进程管理、守护、文件操作、
+内嵌资源释放、导出/导入整合包。
+
+职责范围：
+
+	· UI 界面
+	· 进程管理（拉起 Java 21 加载器、监控退出）
+	· 守护（崩溃检测、崩溃提示）
+	· 文件操作（复制、删除、硬链接、Junction）
+	· 内嵌资源释放（首次启动时解压到 %TEMP% 和 .minecraft）
+	· 导出/导入整合包（纯文件操作）
+	· 建立 Junction 重定向
+	· IPC 通信（接收加载器状态回传）
+	· 日志显示（转发加载器和游戏的日志）
+
+不负责：
+
+	· 扫描 mod 目录（加载器负责）
+	· 解析 mod 元数据（加载器负责）
+	· 五道红线预检（加载器负责）
+	· 依赖解析与拓扑排序（加载器负责）
+	· 部署与重命名（加载器负责）
+	· 沙盒规划（加载器负责）
+
+
+================================================================================
+第二部分  进程树
+================================================================================
+
+	NewFogL.exe (C++)
+		│
+		├── java.exe (jre-21)   ← New Fog 加载器
+		│       │
+		│       └── java.exe (jre-17)   ← 游戏进程
+		│
+		└── （启动器自身 UI 线程，不阻塞）
+
+
+说明：
+
+	· 启动器使用 jre-21 拉起加载器
+	· 加载器使用 jre-17 拉起游戏
+	· 启动器通过读取加载器进程的退出码判断最终结果
+	· 启动器不直接拉起游戏进程
+
+
+================================================================================
+第三部分  项目结构
+================================================================================
+
+NewFogL/
+│
+├── CMakeLists.txt
+├── src/
+│	├── main.cpp                          # Qt GUI 入口（QApplication + MainWindow）
+│	├── main-cmd.cpp                      # 命令行/自检入口（存在但未纳入编译）
+│	│
+│	├── core/                               # 核心基础层
+│	│	├── Logger.h / Logger.cpp           # 日志系统
+│	│	├── Config.h / Config.cpp           # 配置读写
+│	│	├── PathResolver.h / PathResolver.cpp  # 路径推导
+│	│	└── Constants.h                     # 常量定义
+│	│
+│	├── fs/                                 # 文件操作层
+│	│	├── FileUtil.h / FileUtil.cpp       # 复制、删除、存在性检查
+│	│	├── HardLink.h / HardLink.cpp       # 硬链接
+│	│	├── Junction.h / Junction.cpp       # Junction 创建
+│	│	└── FileLock.h / FileLock.cpp       # 文件占用检测
+│	│
+│	├── process/                            # 进程管理层
+│	│	├── ProcessLauncher.h / .cpp        # 拉起进程
+│	│	├── ProcessMonitor.h / .cpp         # 进程存活监控
+│	│	├── ProcessKiller.h / .cpp          # 强制终止
+│	│	└── ProcessScanner.h / .cpp         # 残留进程检测
+│	│
+│	├── guardian/                           # 守护层
+│	│	├── CrashDetector.h / .cpp          # 退出码 → 崩溃类型
+│	│	└── CrashAnalyzer.h / .cpp          # 崩溃原因分析
+│	│	（CrashDialog 崩溃提示对话框：当前版本未实现）
+│	│
+│	├── pack/                               # 导出/导入模块
+│	│	├── PackManifest.h                  # manifest 数据结构（纯头文件）
+│	│	├── ManifestValidator.h / .cpp      # manifest 校验
+│	│	├── PackExporter.h / .cpp           # 打包 .nfp（zip）
+│	│	└── PackImporter.h / .cpp           # 解压 .nfp
+│	│
+│	├── ipc/                                # 通信层
+│	│	├── StateParser.h / .cpp            # 解析 [STATE] 行
+│	│	├── LogForwarder.h / .cpp           # 日志转发到 UI
+│	│	└── RulesParser.h / .cpp            # 解析 newfog-rules.json
+│	│
+│	├── resource/                           # 内嵌资源释放
+│	│	├── ResourceExtractor.h / .cpp      # 解压内嵌资源
+│	│	└── VersionChecker.h / .cpp         # 版本比对
+│	│
+│	├── instance/                           # 实例管理
+│	│	├── InstanceManager.h / .cpp        # 实例列表与增删改查
+│	│	├── InstanceConfig.h / .cpp         # instance.json 读写（类名 InstanceConfigIO）
+│	│	└── JunctionSync.h / .cpp           # Junction 同步
+│	│
+│	├── app/                                # 启动流程编排
+│	│	└── LaunchFlow.h / .cpp             # 串联各层完成一次启动（UI 调用的核心）
+│	│
+│	└── ui/                                 # UI 层（Qt6 自绘）
+│		├── FramelessWindow.h / .cpp        # 无边框窗口基类
+│		├── MainWindow.h / .cpp             # 主窗口（页面切换 + 启动线程）
+│		├── Sidebar.h / .cpp                # 左侧边栏
+│		├── LogPanel.h / .cpp               # 日志面板
+│		├── VersionSelectPage.h / .cpp      # 版本选择页
+│		├── InstanceSettingsPage.h / .cpp   # 实例设置页
+│		├── NFButton.h / .cpp               # 自绘按钮
+│		├── NFListWidget.h / .cpp           # 自绘列表
+│		├── NFSwitch.h / .cpp               # 自绘开关
+│		├── NFDialog.h / .cpp               # 自绘弹窗
+│		└── InstanceSelectPage.h / .cpp     # 旧版实例选择页（存在但未纳入编译）
+│
+├── resources/                            # 内嵌资源源文件
+│	├── launcher/
+│	│	├── icons/
+│	│	├── lang/
+│	│	└── ui-framework/
+│	├── runtime/
+│	│	├── jre-17/
+│	│	└── jre-21/
+│	├── loaders/
+│	│	├── forge/
+│	│	├── neoforge/
+│	│	└── fabric/
+│	├── mods/
+│	│	└── fabric-api-0.92.12+1.20.1.jar
+│	├── core/
+│	│	└── newfog-loader.jar
+│	└── config/
+│		├── NewFogL-config.json
+│		├── instance-template.json
+│		└── pack-manifest-template.json
+│
+├── third_party/                          # 第三方库
+│	├── nlohmann-json/                  # 已接入（CMake 含其 include 路径）
+│	├── imgui/                           # 未接入
+│	├── zlib/                            # 未接入
+│	└── minizip/                         # 未接入
+│
+└── tests/                                # 单元测试（当前版本未实现）
+	├── fs/
+	├── process/
+	├── pack/
+	└── instance/
+
+
+================================================================================
+第四部分  CMakeLists.txt 关键配置
+================================================================================
+
+cmake_minimum_required(VERSION 3.20)
+
+project(NewFogL VERSION 1.0.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+# Qt 路径（未显式传入时用默认相对路径）
+if(NOT DEFINED CMAKE_PREFIX_PATH)
+	set(CMAKE_PREFIX_PATH "${CMAKE_SOURCE_DIR}/../Qt/6.12.0/msvc2022_64")
+endif()
+
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
+
+# Qt 自动处理 moc / 资源 / 界面
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
+set(CMAKE_AUTOUIC ON)
+
+if(MSVC)
+	add_compile_options(/utf-8)
+endif()
+
+# 源文件：显式清单（不再使用 file(GLOB)，避免漏编）
+set(SOURCES
+	src/main.cpp
+
+	src/core/Constants.h
+	src/core/Logger.h / Logger.cpp
+	src/core/PathResolver.h / PathResolver.cpp
+	src/core/Config.h / Config.cpp
+
+	src/fs/FileUtil.h / FileUtil.cpp
+	src/fs/HardLink.h / HardLink.cpp
+	src/fs/FileLock.h / FileLock.cpp
+	src/fs/Junction.h / Junction.cpp
+
+	src/process/ProcessKiller.h / ProcessKiller.cpp
+	src/process/ProcessMonitor.h / ProcessMonitor.cpp
+	src/process/ProcessLauncher.h / ProcessLauncher.cpp
+	src/process/ProcessScanner.h / ProcessScanner.cpp
+
+	src/guardian/CrashDetector.h / CrashDetector.cpp
+	src/guardian/CrashAnalyzer.h / CrashAnalyzer.cpp
+
+	src/ipc/StateParser.h / StateParser.cpp
+	src/ipc/LogForwarder.h / LogForwarder.cpp
+	src/ipc/RulesParser.h / RulesParser.cpp
+
+	src/resource/VersionChecker.h / VersionChecker.cpp
+	src/resource/ResourceExtractor.h / ResourceExtractor.cpp
+
+	src/instance/InstanceConfig.h / InstanceConfig.cpp
+	src/instance/InstanceManager.h / InstanceManager.cpp
+	src/instance/JunctionSync.h / JunctionSync.cpp
+
+	src/pack/PackManifest.h
+	src/pack/ManifestValidator.h / ManifestValidator.cpp
+	src/pack/PackExporter.h / PackExporter.cpp
+	src/pack/PackImporter.h / PackImporter.cpp
+
+	src/app/LaunchFlow.h / LaunchFlow.cpp
+
+	src/ui/FramelessWindow.h / FramelessWindow.cpp
+	src/ui/MainWindow.h / MainWindow.cpp
+	src/ui/Sidebar.h / Sidebar.cpp
+	src/ui/LogPanel.h / LogPanel.cpp
+	src/ui/VersionSelectPage.h / VersionSelectPage.cpp
+	src/ui/InstanceSettingsPage.h / InstanceSettingsPage.cpp
+	src/ui/NFButton.h / NFButton.cpp
+	src/ui/NFListWidget.h / NFListWidget.cpp
+	src/ui/NFSwitch.h / NFSwitch.cpp
+	src/ui/NFDialog.h / NFDialog.cpp
+)
+
+add_executable(NewFogL ${SOURCES})
+
+target_include_directories(NewFogL PRIVATE
+	src
+	third_party/nlohmann-json/include
+)
+
+target_link_libraries(NewFogL PRIVATE
+	Qt6::Core
+	Qt6::Gui
+	Qt6::Widgets
+	shell32
+	user32
+	gdi32
+	advapi32
+)
+
+# Windows：构建后调用 windeployqt 自动复制 Qt 运行库
+if(WIN32)
+	get_filename_component(QT_BIN_DIR "${CMAKE_PREFIX_PATH}/bin" ABSOLUTE)
+	find_program(WINDEPLOYQT_EXE windeployqt HINTS "${QT_BIN_DIR}")
+
+	if(WINDEPLOYQT_EXE)
+		add_custom_command(TARGET NewFogL POST_BUILD
+			COMMAND "${WINDEPLOYQT_EXE}"
+				--no-translations
+				--no-system-d3d-compiler
+				--no-opengl-sw
+				"$<TARGET_FILE:NewFogL>"
+			COMMENT "正在自动复制 Qt 依赖库 (windeployqt)..."
+		)
+	endif()
+endif()
+
+说明：
+
+	· 当前版本已迁移到 Qt6，源文件采用显式清单（SOURCES），不再用 file(GLOB)
+	· 不再链接 zlib / minizip / imgui
+	· 未纳入编译的文件：src/main-cmd.cpp、src/ui/InstanceSelectPage.h / .cpp
+	· 内嵌资源脚本（GenerateResources.cmake、resources.rc）：当前版本未实现，
+	  资源暂从本地 resources/ 目录复制释放（见第十一部分、第十四部分）
+	· Minecraft 1.20.1 核心（1.20.1.jar / 1.20.1.json）不再内嵌，
+	  由启动器从官方源（piston-meta.mojang.com）下载（见 13.3、第十四部分）
+
+
+================================================================================
+第五部分  core/ 核心基础层
+================================================================================
+
+--------------------------------------------------------------------------------
+5.1  Constants.h（常量定义）
+--------------------------------------------------------------------------------
+
+	#pragma once
+
+	namespace NewFogL {
+
+		// 版本
+		constexpr const char* VERSION = "1.0.0";
+		constexpr const char* INTERFACE_VERSION = "1.0.0";
+
+		// Java 版本
+		constexpr int JAVA_VERSION_LOADER = 21;
+		constexpr int JAVA_VERSION_GAME = 17;
+
+		// 游戏版本
+		constexpr const char* GAME_VERSION = "1.20.1";
+
+		// 加载器版本
+		constexpr const char* FORGE_VERSION = "47.4.26";
+		constexpr const char* NEOFORGE_VERSION = "47.1.100";
+		constexpr const char* FABRIC_LOADER_VERSION = "0.15.11";
+		constexpr const char* FABRIC_API_VERSION = "0.92.12+1.20.1";
+
+		// 目录名
+		constexpr const char* DIR_VERSIONS = "versions";
+		constexpr const char* DIR_NEWFOGL = "NewFogL";
+		constexpr const char* DIR_LIBRARIES = "libraries";
+		constexpr const char* DIR_ASSETS = "assets";
+		constexpr const char* DIR_RUNTIME = "runtime";
+
+		// 路径分隔符
+		constexpr const char* PATH_SEP = "\\";
+
+		// 日志轮转
+		constexpr unsigned long long LOG_MAX_SIZE = 10ULL * 1024 * 1024;
+		constexpr int LOG_MAX_HISTORY = 5;
+
+		// 超时
+		constexpr int PROCESS_WAIT_TIMEOUT_MS = 30000;
+		constexpr int FILE_LOCK_CHECK_INTERVAL_MS = 500;
+
+		// 资源版本（用于 %TEMP%\NewFogL\.version 比对，变更则触发重新解压）
+		constexpr const char* RESOURCE_VERSION = "20261015";
+
+	}
+
+
+--------------------------------------------------------------------------------
+5.2  Logger.h / Logger.cpp（日志系统）
+--------------------------------------------------------------------------------
+
+Logger.h：
+
+	#pragma once
+	#include <string>
+	#include <fstream>
+	#include <mutex>
+	#include <functional>
+	#include <vector>
+
+	namespace NewFogL {
+
+		enum class LogLevel {
+			DEBUG,
+			INFO,
+			WARN,
+			ERROR,
+			FATAL
+		};
+
+		class Logger {
+		public:
+			static Logger& instance();
+
+			void init(const std::string& logPath, bool debugEnabled);
+			void setConsoleFilter(const std::vector<std::string>& modules);
+
+			void debug(const std::string& module, const std::string& message);
+			void info(const std::string& module, const std::string& message);
+			void warn(const std::string& module, const std::string& message);
+			void error(const std::string& module, const std::string& message);
+			void fatal(const std::string& module, const std::string& message);
+
+			void setUiCallback(std::function<void(const std::string&)> callback);
+
+		private:
+			void write(LogLevel level, const std::string& module,
+					   const std::string& message);
+			std::string formatTimestamp();
+			std::string levelToString(LogLevel level);
+
+			std::ofstream file_;
+			std::mutex mutex_;
+			bool debugEnabled_ = true;
+			std::vector<std::string> consoleFilter_;
+			std::function<void(const std::string&)> uiCallback_;
+		};
+
+	}
+
+Logger.cpp：
+
+	关键实现：
+
+	1. 时间戳格式：yyyy-MM-dd HH:mm:ss
+	2. 格式：[时间戳] [级别] [模块] 原始消息
+	3. 所有日志写入文件
+	4. 控制台只输出 consoleFilter_ 里包含的模块
+	5. 同时通过 uiCallback_ 转发到 UI
+
+	控制台过滤规则：
+
+		UI         ✗
+		Config     ✗
+		Instance   ✗
+		Scanner    ✓
+		PreFlight  ✓
+		Resolver   ✓
+		Arbiter    ✓
+		Deploy     ✓
+		Launcher   ✓
+		Game       ✓
+
+
+--------------------------------------------------------------------------------
+5.3  Config.h / Config.cpp（配置读写）
+--------------------------------------------------------------------------------
+
+Config.h：
+
+	#pragma once
+	#include <string>
+	#include <vector>
+	#include <nlohmann/json.hpp>
+
+	namespace NewFogL {
+
+		struct JavaConfig {
+			std::string jre17Path;
+			std::string jre21Path;
+			int defaultVersion = 17;
+		};
+
+		struct UiConfig {
+			std::string language = "zh-CN";
+			std::string theme = "dark";
+			int windowWidth = 900;
+			int windowHeight = 600;
+		};
+
+		struct DownloadConfig {
+			std::string mirror = "official";
+			int maxThreads = 4;
+		};
+
+		struct LoggingConfig {
+			bool debugEnabled = true;
+			std::vector<std::string> consoleFilter;
+		};
+
+		struct Account {
+			std::string id;
+			std::string type;          // 固定 "microsoft"（仅正版登录）
+			std::string username;
+			std::string uuid;
+			std::string accessToken;
+			std::string refreshToken;
+			std::string expiresAt;
+			bool isDefault = false;
+		};
+
+		struct GlobalConfig {
+			std::string version;
+			std::vector<Account> accounts;
+			JavaConfig java;
+			UiConfig ui;
+			DownloadConfig download;
+			LoggingConfig logging;
+		};
+
+		class Config {
+		public:
+			static GlobalConfig loadGlobal(const std::string& path);
+			static void saveGlobal(const std::string& path,
+								   const GlobalConfig& config);
+		};
+
+	}
+
+Config.cpp：
+
+	关键实现：
+
+	1. 用 nlohmann::json 解析 JSON
+	2. 字段缺失时用默认值补全
+	3. 版本号不一致时做配置迁移
+	4. 写回时保持 UTF-8 无 BOM
+
+
+--------------------------------------------------------------------------------
+5.4  PathResolver.h / PathResolver.cpp（路径推导）
+
+PathResolver.h：
+
+	#pragma once
+	#include <string>
+
+	namespace NewFogL {
+
+		class PathResolver {
+		public:
+			// 以 exe 所在目录为基准
+			static std::string getExeDir();
+			static std::string getMcDir();
+
+			// .minecraft 下的目录
+			static std::string getVersionsDir();
+			static std::string getNewFogLDir();
+			static std::string getLibrariesDir();
+			static std::string getAssetsDir();
+			static std::string getRuntimeDir();
+
+			// NewFogL 下的目录
+			static std::string getConfigPath();
+			static std::string getInstancesDir();
+			static std::string getModsDir();
+			static std::string getCacheDir();
+			static std::string getSharedDir();
+			static std::string getExportsDir();
+			static std::string getImportsDir();
+			static std::string getLogsDir();
+			static std::string getScriptsDir();
+
+			// 特定实例的目录
+			static std::string getInstanceDir(const std::string& name);
+			static std::string getInstanceConfigPath(const std::string& name);
+			static std::string getInstanceCacheDir(const std::string& name);
+			static std::string getInstanceModsDir(const std::string& name);
+			static std::string getInstanceLogDir(const std::string& name);
+		};
+
+	}
+
+PathResolver.cpp：
+
+	getExeDir 实现：
+
+	std::string PathResolver::getExeDir() {
+		char buffer[MAX_PATH];
+		GetModuleFileNameA(NULL, buffer, MAX_PATH);
+		std::string path(buffer);
+		size_t pos = path.find_last_of("\\");
+		return path.substr(0, pos);
+	}
+
+	其他方法基于 getExeDir 拼接相对路径。
+
+
+================================================================================
+第六部分  fs/ 文件操作层
+================================================================================
+
+--------------------------------------------------------------------------------
+6.1  FileUtil.h / FileUtil.cpp
+--------------------------------------------------------------------------------
+
+	常用方法：
+
+	· bool exists(const std::string& path)
+	· bool isDirectory(const std::string& path)
+	· bool isFile(const std::string& path)
+	· void createDirectories(const std::string& path)
+	· void copyFile(const std::string& src, const std::string& dst)
+	· void copyDirectory(const std::string& src, const std::string& dst)
+	· void deleteFile(const std::string& path)
+	· void deleteDirectory(const std::string& path)
+	· std::vector<std::string> listFiles(const std::string& dir)
+	· std::string readFile(const std::string& path)
+	· void writeFile(const std::string& path, const std::string& content)
+	· uint64_t getFileSize(const std::string& path)
+	· std::string getFileHash(const std::string& path)
+
+
+--------------------------------------------------------------------------------
+6.2  HardLink.h / HardLink.cpp
+--------------------------------------------------------------------------------
+
+	方法：
+
+	bool createHardLink(const std::string& source,
+						const std::string& target) {
+		return CreateHardLinkA(target.c_str(), source.c_str(), NULL);
+	}
+
+
+--------------------------------------------------------------------------------
+6.3  Junction.h / Junction.cpp
+--------------------------------------------------------------------------------
+
+	方法：
+
+	bool createJunction(const std::string& target,
+						const std::string& source) {
+		std::string cmd = "cmd /c mklink /J \"" + target + "\" \"" + source + "\"";
+		int result = system(cmd.c_str());
+		return result == 0;
+	}
+
+	bool isJunction(const std::string& path) {
+		DWORD attrs = GetFileAttributesA(path.c_str());
+		return (attrs != INVALID_FILE_ATTRIBUTES) &&
+			   (attrs & FILE_ATTRIBUTE_REPARSE_POINT);
+	}
+
+	bool isJunctionPointingTo(const std::string& junction,
+							  const std::string& target) {
+		// 使用 DeviceIoControl + FSCTL_GET_REPARSE_POINT 比对目标
+	}
+
+
+--------------------------------------------------------------------------------
+6.4  FileLock.h / FileLock.cpp
+--------------------------------------------------------------------------------
+
+	方法：
+
+	bool isFileLocked(const std::string& path) {
+		HANDLE h = CreateFileA(path.c_str(),
+							   GENERIC_READ | GENERIC_WRITE,
+							   0,                     // dwShareMode = 0：独占
+							   nullptr,
+							   OPEN_EXISTING,
+							   FILE_ATTRIBUTE_NORMAL,
+							   nullptr);
+
+		if (h == INVALID_HANDLE_VALUE) {
+			DWORD err = GetLastError();
+			// 文件不存在不算"被占用"
+			if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
+				return false;
+			}
+			// 其他原因（共享冲突 / 权限不足等）视为不可用
+			return true;
+		}
+
+		// 打开成功 → 没有其他进程占用 → 关闭句柄
+		CloseHandle(h);
+		return false;
+	}
+
+	bool isDirectoryLocked(const std::string& dir) {
+		for (const auto& file : FileUtil::listFiles(dir)) {
+			if (isFileLocked(file)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+
+================================================================================
+第七部分  process/ 进程管理层
+================================================================================
+
+--------------------------------------------------------------------------------
+7.1  ProcessLauncher.h / ProcessLauncher.cpp
+--------------------------------------------------------------------------------
+
+ProcessLauncher.h：
+
+	#pragma once
+	#include <string>
+	#include <windows.h>
+	#include <functional>
+
+	namespace NewFogL {
+
+		struct ProcessResult {
+			DWORD exitCode;
+			std::string output;
+			std::string error;
+		};
+
+		class ProcessLauncher {
+		public:
+			// 拉起加载器（Java 21）
+			static ProcessResult launchLoader(
+				const std::string& jre21Path,
+				const std::string& loaderJarPath,
+				const std::string& instanceName,
+				const std::string& modsDir,
+				const std::string& cacheDir,
+				const std::string& versionsDir,
+				const std::string& configPath,
+				const std::string& logFilePath,
+				std::function<void(const std::string&)> onOutput
+			);
+
+		private:
+			static ProcessResult executeAndWait(
+				const std::string& cmdLine,
+				const std::string& workingDir,
+				std::function<void(const std::string&)> onOutput
+			);
+		};
+
+	}
+
+ProcessLauncher.cpp 关键实现：
+
+	ProcessResult ProcessLauncher::executeAndWait(
+		const std::string& cmdLine,
+		const std::string& workingDir,
+		std::function<void(const std::string&)> onOutput) {
+
+		SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
+		HANDLE hReadPipe, hWritePipe;
+		CreatePipe(&hReadPipe, &hWritePipe, &sa, 0);
+
+		STARTUPINFOA si = { sizeof(si) };
+		si.dwFlags = STARTF_USESTDHANDLES;
+		si.hStdOutput = hWritePipe;
+		si.hStdError = hWritePipe;
+
+		PROCESS_INFORMATION pi = { 0 };
+
+		CreateProcessA(
+			NULL,
+			const_cast<char*>(cmdLine.c_str()),
+			NULL, NULL, TRUE,
+			CREATE_NO_WINDOW,
+			NULL,
+			workingDir.c_str(),
+			&si, &pi
+		);
+
+		CloseHandle(hWritePipe);
+
+		std::string output;
+		std::thread reader([&]() {
+			char buffer[4096];
+			DWORD bytesRead;
+			while (ReadFile(hReadPipe, buffer, sizeof(buffer) - 1,
+							&bytesRead, NULL) && bytesRead > 0) {
+				buffer[bytesRead] = '\0';
+				std::string line(buffer);
+				output += line;
+				if (onOutput) onOutput(line);
+			}
+		});
+
+		WaitForSingleObject(pi.hProcess, INFINITE);
+
+		DWORD exitCode;
+		GetExitCodeProcess(pi.hProcess, &exitCode);
+
+		reader.join();
+		CloseHandle(pi.hProcess);
+		CloseHandle(pi.hThread);
+		CloseHandle(hReadPipe);
+
+		return { exitCode, output, "" };
+	}
+
+
+--------------------------------------------------------------------------------
+7.2  ProcessMonitor.h / ProcessMonitor.cpp
+--------------------------------------------------------------------------------
+
+	职责：
+
+	· 监控加载器进程状态
+	· 解析 stdout 输出，转发到 UI
+	· 检测进程是否意外退出
+	· 提供进程 PID 用于强制终止
+
+	关键方法：
+
+	class ProcessMonitor {
+	public:
+		void start(DWORD pid);
+		void stop();
+		bool isRunning() const;
+		DWORD getPid() const;
+
+	private:
+		DWORD pid_;
+		std::atomic<bool> running_;
+	};
+
+
+--------------------------------------------------------------------------------
+7.3  ProcessKiller.h / ProcessKiller.cpp
+--------------------------------------------------------------------------------
+
+	方法：
+
+	bool killProcess(DWORD pid) {
+		HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+		if (h == NULL) return false;
+		bool result = TerminateProcess(h, 0);
+		CloseHandle(h);
+		return result;
+	}
+
+	bool killProcessTree(DWORD pid) {
+		std::string cmd = "taskkill /F /T /PID " + std::to_string(pid);
+		return system(cmd.c_str()) == 0;
+	}
+
+
+--------------------------------------------------------------------------------
+7.4  ProcessScanner.h / ProcessScanner.cpp
+--------------------------------------------------------------------------------
+
+	职责：
+
+	· 检测残留的 java.exe 进程
+	· 用于启动前检查，避免文件占用
+
+	方法：
+
+	std::vector<unsigned long> findJavaProcesses() {
+		// 用 ProcessLauncher 执行 tasklist
+		ProcessResult r = ProcessLauncher::executeAndWait(
+			"tasklist /FI \"IMAGENAME eq java.exe\" /FO CSV /NH", "", nullptr);
+		if (r.exitCode != 0) return {};   // 执行失败返回空列表
+
+		std::vector<unsigned long> result;
+		// 逐行解析 CSV：每行形如 "java.exe","12345","Console","1","123,456 K"
+		// 跳过不含双引号的信息行；取第 3、4 个双引号之间的字段做 stoul → PID
+		return result;
+	}
+
+	bool hasJavaProcess() {
+		return !findJavaProcesses().empty();
+	}
+
+
+================================================================================
+第八部分  guardian/ 守护层
+================================================================================
+
+--------------------------------------------------------------------------------
+8.1  CrashDetector.h / CrashDetector.cpp
+--------------------------------------------------------------------------------
+
+	职责：
+
+	· 加载器进程退出后，根据退出码判断是否崩溃
+	· 退出码 0 为正常，其他为崩溃
+
+	方法（均为静态方法）：
+
+	enum class CrashType {
+		NONE,
+		PREFLIGHT_FAILED,
+		RESOLVE_FAILED,
+		DEPLOY_FAILED,
+		SANDBOX_FAILED,
+		INTERNAL_ERROR,
+		PARAM_ERROR,
+		GAME_LAUNCH_FAILED,
+		UNKNOWN
+	};
+
+	// 退出码 → 崩溃类型的映射（detect 内部 switch）：
+	//   0→NONE  1→PREFLIGHT_FAILED  2→RESOLVE_FAILED  3→DEPLOY_FAILED
+	//   4→SANDBOX_FAILED  5→INTERNAL_ERROR  6→PARAM_ERROR  7→GAME_LAUNCH_FAILED
+	//   其他→UNKNOWN
+	// exitCode 用 unsigned long（与 ProcessResult::exitCode 一致）
+	static CrashType detect(unsigned long exitCode);
+
+	// 取得 CrashType 的中文名称（日志 / 弹窗标题）
+	static std::string toString(CrashType type);
+
+
+--------------------------------------------------------------------------------
+8.2  CrashAnalyzer.h / CrashAnalyzer.cpp
+--------------------------------------------------------------------------------
+
+	职责：
+
+	· 读取日志最后 100 行，关键词匹配崩溃原因
+	· 返回一句用户可读的中文结论
+
+	方法（均为静态方法）：
+
+	// 读取日志末尾 100 行，按关键词推断崩溃原因
+	// 关键词：
+	//    "OutOfMemoryError"      → "内存不足"
+	//    "NoClassDefFoundError"  → "缺少依赖库"
+	//    "MixinApplyError"       → "模组 Mixin 冲突"
+	//    "依赖缺失"              → "缺少依赖"
+	// 无法识别时返回兜底文案（不返回空串）
+	static std::string analyze(const std::string& logFilePath);
+
+	// 取得"未识别出原因"时使用的固定兜底文案
+	static std::string fallbackMessage();
+
+
+--------------------------------------------------------------------------------
+8.3  CrashDialog.h / CrashDialog.cpp（当前版本未实现）
+--------------------------------------------------------------------------------
+
+说明：
+
+	下列对话框为设计稿。当前代码库中不存在 CrashDialog，尚未实现；
+	崩溃提示目前只以日志形式输出（见 13.6 节）。
+
+职责：
+
+	· 弹出崩溃提示对话框
+	· 提供操作按钮
+
+对话框内容：
+
+	┌─────────────────────────────────────────────┐
+	│  ⚠️ 游戏崩溃                                  │
+	├─────────────────────────────────────────────┤
+	│                                             │
+	│  错误类型：静态预检失败                       │
+	│  错误详情：检测到多版本模组 sodium            │
+	│                                             │
+	│  涉及模组：                                  │
+	│  - sodium-0.5.8.jar                         │
+	│  - sodium-0.6.0.jar                         │
+	│                                             │
+	│  [ 查看日志 ]  [ 重新启动 ]  [ 关闭 ]         │
+	└─────────────────────────────────────────────┘
+
+
+================================================================================
+第九部分  pack/ 导出/导入模块
+================================================================================
+
+--------------------------------------------------------------------------------
+9.1  PackManifest.h（manifest 数据结构）
+--------------------------------------------------------------------------------
+
+	说明：本项为纯头文件（PackManifest.h），无 .cpp。
+
+	struct ModEntry {
+		std::string file;       // 相对路径，如 "mods/F001_jei.jar"
+		std::string modId;      // modid，如 "jei"
+		std::string version;    // 版本，如 "15.2.0"
+	};
+
+	// 包含内容开关（mods 始终包含，不在此结构内）
+	struct PackIncludes {
+		bool saves = false;
+		bool resourcepacks = false;
+		bool shaderpacks = false;
+		bool screenshots = false;
+		bool servers = false;
+		bool options = false;
+	};
+
+	struct PackManifest {
+		int         formatVersion = 1;
+		std::string packName;
+		std::string packVersion;
+		std::string author;
+		std::string description;
+		std::string createdAt;      // ISO 8601
+
+		std::string gameVersion;    // 固定 "1.20.1"
+		std::string loader;         // forge / neoforge / fabric
+		std::string loaderVersion;
+		int         javaVersion = 17;
+		std::string recommendedMemory;
+		std::string minMemory;
+
+		int                   modCount = 0;
+		std::vector<ModEntry> mods;
+
+		PackIncludes includes;
+
+		std::string checksum;
+	};
+
+
+--------------------------------------------------------------------------------
+9.2  ManifestValidator.h / ManifestValidator.cpp
+--------------------------------------------------------------------------------
+
+	方法（静态）：
+
+	// 逐项校验，遇到错误即停止并填充 errorMsg
+	static bool validate(const PackManifest& manifest, std::string& errorMsg);
+
+	校验项（按顺序）：
+
+	1. formatVersion != 1
+		→ "整合包版本过新，请升级 NewFogL（当前支持版本：1）"
+	2. gameVersion != "1.20.1"
+		→ "只支持 1.20.1 整合包（当前包版本：...）"
+	3. loader 不是 forge / neoforge / fabric
+		→ "不支持的加载器：..."
+	4. modCount 与 mods 列表长度不一致
+		→ "元数据损坏：modCount (...) 与实际模组数量 (...) 不符"
+
+
+--------------------------------------------------------------------------------
+9.3  PackExporter.h / PackExporter.cpp
+--------------------------------------------------------------------------------
+
+	入口方法（静态）：
+
+	struct ExportOptions {
+		std::string packName;
+		std::string packVersion;
+		std::string author;
+		std::string description;
+		std::string coverImagePath;     // 可选
+
+		bool includeSaves = false;
+		bool includeResourcepacks = false;
+		bool includeShaderpacks = false;
+		bool includeScreenshots = false;
+		bool includeServers = false;
+		bool includeOptions = false;
+	};
+
+	struct ExportResult {
+		bool success = false;
+		std::string outputPath;
+		unsigned long long fileSize = 0;
+		std::string errorMsg;
+	};
+
+	static ExportResult exportPack(
+		const std::string& instanceName,
+		const std::string& outputNfpPath,
+		const ExportOptions& options,
+		std::function<void(const std::string&)> onProgress
+	);
+
+	流程：
+
+	1. 检查实例是否存在
+	2. 创建临时目录 NewFogL\exports\临时文件\temp_{yyyyMMdd_HHmmss}\
+	3. 收集 mods：
+		· cache\{实例名}\mods-deployed\  → 临时\mods\
+		· 若 mods-deployed 不存在，退回 mods\{实例名}\mods\
+	4. 收集 configs：cache\{实例名}\configs\ → 临时\configs\
+	5. 收集可选内容（按选项，如 saves）
+	6. 生成 manifest.json 写入临时目录
+	7. 压缩成 .nfp：调用 tar.exe 生成 zip
+		· tar.exe -c -f "xx.nfp" --format=zip -C 临时目录 .
+	8. 删除临时目录
+	9. 返回结果
+
+	说明：
+
+		· onProgress 回调参数为当前步骤的中文描述（不是百分比）
+		· manifest 的 mods 列表当前为占位空数组，modCount 暂记 0
+		  （真实扫描部署区待补充）
+
+
+--------------------------------------------------------------------------------
+9.4  PackImporter.h / PackImporter.cpp
+--------------------------------------------------------------------------------
+
+	入口方法（静态）：
+
+	struct ImportOptions {
+		std::string sourceNfpPath;
+		std::string targetInstanceName;
+	};
+
+	struct ImportResult {
+		bool success = false;
+		std::string instanceName;
+		std::string errorMsg;
+	};
+
+	static ImportResult importPack(
+		const ImportOptions& options,
+		std::function<void(const std::string&)> onProgress
+	);
+
+	流程：
+
+	1. 检查目标实例是否存在：
+		· 存在 → 直接返回失败（同名实例已存在），由 UI 处理
+	2. 创建临时解压目录 NewFogL\imports\imp_{yyyyMMdd_HHmmss}\
+	3. 解压：tar.exe -x -f "xx.nfp" -C 临时目录
+		· 失败 → "解压失败，可能不是有效的 zip 文件"
+	4. 读取 manifest.json（缺失或损坏 → 失败）
+	5. 调用 ManifestValidator 校验
+	6. 创建实例配置：
+		· InstanceManager::createInstanceDirectories(实例名)
+		· InstanceManager::save(cfg)（写 versions\{实例名}\instance.json
+		  与 NewFogL\instances\{实例名}.json 两份）
+	7. 复制文件到实例目录：
+		· 临时\mods\    → cache\{实例名}\mods-deployed\
+		· 临时\configs\ → cache\{实例名}\configs\
+	8. 同步 Junction（JunctionSync::syncAll）
+	9. 清理临时目录
+	10. 返回结果
+
+	说明：
+
+		· onProgress 回调参数为当前步骤的中文描述（不是百分比）
+		· 设计中的"释放 1.20.1 核心 / 加载器、复制存档、建立全部分类 Junction"
+		  等步骤当前版本未实现，仅完成上述 mods/configs 复制与 Junction 同步
+
+
+================================================================================
+第十部分  ipc/ 通信层
+================================================================================
+
+--------------------------------------------------------------------------------
+10.1  stdout 读取（合并至 ProcessLauncher）
+--------------------------------------------------------------------------------
+
+	原设计中 ipc 层的 stdout 读取职责（读取子进程 stdout + 逐行拆分），
+	实现时这一职责已合并至 process/ProcessLauncher::executeAndWait：
+
+		· ProcessLauncher 用 CreatePipe 创建匿名管道
+		· 子线程 ReadFile 循环读管道
+		· 按换行符拆分，去除行尾 \r
+		· 通过 onOutput 回调逐行交给调用方
+
+	因此 ipc 层不再单独实现该读取器，避免两处同时读同一管道。
+
+	调用方拿到每一行后，自行分派给：
+		· StateParser   —— 若以 [STATE] 开头
+		· LogForwarder  —— 其他行
+
+	职责边界（新）：
+
+		模块						负责
+		------------------------	--------------------------------
+		process/ProcessLauncher		读管道 + 逐行拆分 + 回调分发
+		ipc/StateParser				解析 [STATE] 行
+		ipc/LogForwarder			转发日志行到 UI
+
+
+--------------------------------------------------------------------------------
+10.2  StateParser.h / StateParser.cpp
+--------------------------------------------------------------------------------
+
+	职责：
+
+	· 解析 [STATE] 行
+	· 更新 UI 状态
+
+	方法（静态）：
+
+	enum class LoaderState {
+		SCAN_START,
+		SCAN_DONE,
+		PREFLIGHT_START,
+		PREFLIGHT_DONE,
+		RESOLVE_START,
+		RESOLVE_DONE,
+		DEPLOY_START,
+		DEPLOY_DONE,
+		SANDBOX_START,
+		SANDBOX_DONE,
+		PLAN_READY,
+		ABORT,
+		UNKNOWN
+	};
+
+	// 解析一行输出；非 [STATE] 行或阶段名不识别时返回 UNKNOWN
+	// 注意：行必须以 "[STATE]" 开头且其后紧跟空白，返回 UNKNOWN 时 param 被清空
+	static LoaderState parseState(const std::string& line, std::string& param);
+
+	// 取得阶段的中文名称（日志 / UI 状态栏）
+	static std::string toString(LoaderState state);
+
+
+--------------------------------------------------------------------------------
+10.3  LogForwarder.h / LogForwarder.cpp
+--------------------------------------------------------------------------------
+
+	职责：
+
+	· 转发加载器日志到 UI 日志面板
+	· 转发游戏日志到 UI 日志面板
+
+	方法（非静态，可实例化，持有 UI 回调）：
+
+	class LogForwarder {
+	public:
+		// 注册 UI 回调；传空可取消注册
+		void setUiCallback(std::function<void(const std::string&)> callback);
+
+		// 转发一行；以 [STATE] 开头的行会被跳过；未设置回调时静默丢弃
+		void forward(const std::string& line);
+
+	private:
+		std::function<void(const std::string&)> uiCallback_;
+	};
+
+
+--------------------------------------------------------------------------------
+10.4  RulesParser.h / RulesParser.cpp
+--------------------------------------------------------------------------------
+
+	职责：
+
+	· 读取 cache\{实例名}\newfog-rules.json（启动计划）
+	· 提取 scriptPath / javaPath / gameVersion 等关键字段
+	· 统计沙盒 / 加载顺序数量供 UI 展示
+
+	数据结构：
+
+	struct LoadRules {
+		std::string instanceName;
+		std::string gameVersion;
+		std::string loader;
+		std::string loaderVersion;
+		int         javaVersion = 17;
+		std::string javaPath;
+		std::string scriptPath;
+
+		// 以下仅用于日志展示，不参与启动逻辑
+		int sandboxCount    = 0;
+		int loadOrderCount  = 0;
+		int cycleGroupCount = 0;
+	};
+
+	方法（静态）：
+
+	// 解析成功且 scriptPath / gameVersion 合法返回 true
+	// 文件不存在或 JSON 损坏返回 false；gameVersion 必须为 "1.20.1"
+	static bool load(const std::string& filePath, LoadRules& rules);
+
+
+================================================================================
+第十一部分  resource/ 内嵌资源释放
+================================================================================
+
+--------------------------------------------------------------------------------
+11.1  ResourceExtractor.h / ResourceExtractor.cpp
+--------------------------------------------------------------------------------
+
+	职责：
+
+	· 首次启动时释放启动器运行所需资源到 %TEMP%\NewFogL
+	· 首次启动游戏时释放 JRE 到 .minecraft（游戏核心不走这里，由官方源下载）
+	· 当前为"从本地 resources 目录复制"的过渡实现（内嵌资源段提取当前版本未实现）
+
+	方法：
+
+	class ResourceExtractor {
+	public:
+		// 释放启动器 UI 运行所需资源（sourceDir 当前为 "resources/launcher"）
+		static bool extractLauncherResources(const std::string& sourceDir);
+
+		// 释放加载器、JRE 等资源到实例目录（游戏核心由官方源下载）
+		static bool extractGameResources(const std::string& instanceName,
+										 const std::string& sourceDir);
+
+		// 释放 JRE（设计稿；当前版本未实现）
+		static bool extractJre(int javaVersion);
+
+	private:
+		// 底层目录复制（源目录 → 目标目录）
+		static bool extractTo(const std::string& src,
+							  const std::string& dst);
+
+		// 版本比对决定是否重新解压（设计稿；当前版本未实现，现由 VersionChecker::needsReExtract 负责）
+		static bool needsExtract(const std::string& versionFile,
+								 const std::string& currentVersion);
+	};
+
+
+--------------------------------------------------------------------------------
+11.2  VersionChecker.h / VersionChecker.cpp
+--------------------------------------------------------------------------------
+
+	职责：
+
+	· 比对 %TEMP%\NewFogL\.version 文件和当前 exe 版本
+	· 决定是否需要重新解压
+
+	方法：
+
+	bool needsReExtract() {
+		std::string versionFile = "%TEMP%\\NewFogL\\.version";
+		if (!exists(versionFile)) return true;
+
+		std::string content = readFile(versionFile);
+		// 解析 JSON，比对 resourceVersion
+		return false;
+	}
+
+
+================================================================================
+第十二部分  instance/ 实例管理
+================================================================================
+
+--------------------------------------------------------------------------------
+12.1  InstanceConfig.h / InstanceConfig.cpp（instance.json 数据结构与读写）
+--------------------------------------------------------------------------------
+
+	读写类名为 InstanceConfigIO（不是 InstanceConfig）。
+
+	struct JavaErrorPrompt {
+		bool showVersionConflict = true;
+		bool showMissingJava = true;
+		bool showLoaderIncompatible = true;
+		bool showModJavaMismatch = true;
+	};
+
+	struct InstanceConfig {
+		std::string instanceName;
+		std::string gameVersion = "1.20.1";
+		std::string loader;
+		std::string loaderVersion;
+		int javaVersion = 17;
+		std::string javaPath;
+		std::string maxMemory = "4G";
+		std::string minMemory = "2G";
+		std::vector<std::string> jvmArgs;
+		JavaErrorPrompt javaErrorPrompt;
+		bool javaConflictResolved = false;
+		std::string lastLaunched;
+		std::string lastResult;
+	};
+
+
+	读写方法（InstanceConfigIO，静态）：
+
+	class InstanceConfigIO {
+	public:
+		// 读：缺字段用默认值补全；文件不存在或解析失败返回默认配置（不抛异常）
+		static InstanceConfig load(const std::string& path);
+
+		// 写：UTF-8 无 BOM，缩进 4 空格；不自动创建父目录
+		static bool save(const std::string& path, const InstanceConfig& config);
+	};
+
+
+--------------------------------------------------------------------------------
+12.2  InstanceManager.h / InstanceManager.cpp
+--------------------------------------------------------------------------------
+
+	职责：
+
+	· 扫描 NewFogL\instances\ 下的所有实例
+	· 提供实例的增删改查
+	· 创建实例所需的标准目录结构
+
+	方法（静态）：
+
+	class InstanceManager {
+	public:
+		static std::vector<InstanceConfig> loadAll();
+		static InstanceConfig load(const std::string& name);
+		static bool save(const InstanceConfig& config);
+		static bool remove(const std::string& name);
+		static bool exists(const std::string& name);
+		static bool createInstanceDirectories(const std::string& name);
+	};
+
+	目录结构（createInstanceDirectories 创建）：
+
+	· versions\{实例名}\                 （实例根：游戏读取地）
+	· NewFogL\cache\{实例名}\            （缓存：真实存放地）
+	· NewFogL\mods\{实例名}\mods\        （mod 源目录）
+	· NewFogL\logs\{实例名}\             （实例日志）
+
+	存在判据：
+
+	· 以 NewFogL\instances\{实例名}.json 是否存在为准
+	· save 同时写 versions\{实例名}\instance.json 与 instances\{实例名}.json 两份
+	· remove 递归删除 instances 副本 + versions\{实例名}\ + cache\{实例名}\
+	  + mods\{实例名}\ + logs\{实例名}\
+
+
+--------------------------------------------------------------------------------
+12.3  JunctionSync.h / JunctionSync.cpp
+--------------------------------------------------------------------------------
+
+	职责：
+
+	· 为实例建立所有标准目录的 Junction
+	· 把 versions\{实例名}\{dir} 链接到 NewFogL\cache\{实例名}\{dir}
+	· 处理"已是 Junction 但指向错误"（拆掉重建）
+	· 处理"非空普通目录"的遗留数据迁移（先迁移内容到 cache 再删旧目录）
+
+	方法（静态）：
+
+	class JunctionSync {
+	public:
+		static bool syncAll(const std::string& instanceName);
+
+	private:
+		static const std::vector<std::string> STANDARD_DIRS;
+		// = {
+		//     "mods", "config", "defaultconfigs", "saves",
+		//     "resourcepacks", "shaderpacks", "screenshots",
+		//     "logs", "crash-reports", "journeymap", "xaero",
+		//     "iris", "sodium"
+		// }
+
+		static bool syncDirectory(const std::string& instanceName,
+								  const std::string& dirName);
+
+		// static void reverseScan(const std::string& instanceName);
+		// （当前版本未实现）
+	};
+
+	说明：
+
+	· 源（真实存放地）= NewFogL\cache\{实例名}\{dir}
+	· 目标（游戏读取地）= versions\{实例名}\{dir}
+	· 只管标准目录，不管单文件（如 options.txt）
+
+
+================================================================================
+第十三部分  启动流程（详细）
+================================================================================
+
+--------------------------------------------------------------------------------
+13.1  阶段0：初始化
+--------------------------------------------------------------------------------
+
+	1. main.cpp 创建 QApplication（设置全局字体 Microsoft YaHei）
+	2. 构造 MainWindow（FramelessWindow 子类）并 show()
+	3. 进入 Qt 事件循环 app.exec()
+
+	说明：
+
+		· 当前 GUI 入口（src/main.cpp）尚未接入资源释放 / 全局配置读取 /
+		  实例列表预加载等初始化（原设计第 2~7 步当前版本未实现）
+		· 命令行测试入口 src/main-cmd.cpp（含 --selftest 自检）存在但未纳入编译
+
+
+--------------------------------------------------------------------------------
+13.2  阶段1：用户选择实例
+--------------------------------------------------------------------------------
+
+	1. 用户经 Sidebar 的"选择实例"入口进入 VersionSelectPage
+	2. VersionSelectPage 扫描 .minecraft 目录与各实例 versions 文件夹
+	3. 选中实例后通过信号 instanceSelected 回传给 Sidebar
+	4. 点"设置"进入 InstanceSettingsPage 编辑实例
+
+	说明：
+
+		· 实例详情卡片等展示当前版本未实现
+		· 旧版 InstanceSelectPage.h / .cpp 存在但未纳入编译
+
+
+--------------------------------------------------------------------------------
+13.3  阶段2：游戏核心校验
+--------------------------------------------------------------------------------
+
+	1. LaunchFlow 检查实例是否存在（InstanceManager::exists）
+		· 不存在 → 上报错误并返回退出码 1
+	2. 检查 versions\{实例名}\1.20.1.jar 与 1.20.1.json
+		· 缺失 → 从官方源下载后继续
+		· 存在但校验失败（jar 内 version.json 的 id != "1.20.1"）→ 重新下载覆盖
+
+	官方源下载步骤（设计）：
+
+		· 拉取 version_manifest_v2.json，取 1.20.1 的版本 json 地址
+		· 下载 1.20.1.json 到 versions\{实例名}\
+		· 解析 json 内 downloads.client.url 与 sha1，下载 client jar 存为 1.20.1.jar
+		· 按 sha1 校验；失败则重试（次数遵循 download.maxThreads/重试配置）
+
+	说明：
+
+		· 上述下载与校验当前版本未实现，现仅检查实例目录是否存在
+
+
+--------------------------------------------------------------------------------
+13.4  阶段3：Java 运行时校验
+--------------------------------------------------------------------------------
+
+	1.（当前版本未实现）检测实例配置的 javaPath 是否存在
+	2.（当前版本未实现）不存在 → 检查 javaErrorPrompt.showMissingJava
+	3.（当前版本未实现）检测 Java 版本是否匹配
+	4.（当前版本未实现）检测加载器与 Java 兼容性
+
+	说明：
+
+		· LaunchFlow 直接使用固定路径 runtime\jre-21\bin\java.exe，
+		  上述校验尚未接入
+
+
+--------------------------------------------------------------------------------
+13.5  阶段4~10：调用加载器
+--------------------------------------------------------------------------------
+
+	由 app/LaunchFlow::run 编排，按顺序：
+
+	1. 校验实例（InstanceManager::exists / load）
+	2. 同步目录（JunctionSync::syncAll）
+	3. 解析路径（PathResolver）：
+		· jre21Path   = runtime\jre-21\bin\java.exe
+		· loaderJar   = NewFogL\core\newfog-loader.jar
+		· modsDir     = NewFogL\mods\{实例名}\mods
+		· cacheDir    = NewFogL\cache\{实例名}
+		· versionsDir = versions\{实例名}
+		· configPath  = versions\{实例名}\instance.json
+		· logFilePath = NewFogL\logs\{实例名}\runtime.log
+	4. 拉起加载器（ProcessLauncher::launchLoader）：
+
+		ProcessResult result = ProcessLauncher::launchLoader(
+			jre21Path, loaderJar, instanceName,
+			modsDir, cacheDir, versionsDir, configPath, logFilePath,
+			[&](const std::string& line) { /* 逐行回调 */ }
+		);
+
+		· 命令行按 02 号接口文档 2.1 节拼接（--instance / --mods-dir
+		  / --cache-dir / --versions-dir / --config / --log-file）
+		· 工作目录 = versionsDir；stdout 与 stderr 合并到同一条管道
+	5. 逐行处理回调输出：
+		· 以 [STATE] 开头 → StateParser::parseState 解析
+			- 命中 PLAN_READY → RulesParser::load(cacheDir\newfog-rules.json)
+		· 其他行 → LogForwarder::forward 转发到 UI 回调
+
+
+--------------------------------------------------------------------------------
+13.6  阶段11：处理加载器结果
+--------------------------------------------------------------------------------
+
+	加载器退出后由 LaunchFlow 处理：
+
+	CrashType crash = CrashDetector::detect(result.exitCode);
+	if (crash != CrashType::NONE) {
+		std::string reason = CrashAnalyzer::analyze(logFilePath);
+		// 以日志形式上报：崩溃类型 + 分析结论
+		return static_cast<int>(result.exitCode);
+	}
+	// 退出码 0：正常退出
+
+	说明：
+
+		· 当前版本以日志回调输出崩溃信息，不弹 CrashDialog（未实现）
+		· 退出码 → 崩溃类型映射见 8.1 节
+
+
+--------------------------------------------------------------------------------
+13.7  阶段12~13：运行时监控与退出清理
+--------------------------------------------------------------------------------
+
+	1. LaunchFlow 返回退出码给启动线程
+	2. MainWindow 的启动线程在日志面板追加"流程结束"
+	3. UI 恢复"启动游戏"按钮
+
+	说明：
+
+		· 更新实例 lastLaunched / lastResult，以及把 options.txt 等单文件
+		  同步回缓存区，当前版本未实现
+		· 启动线程模型见 13.8 节
+
+
+--------------------------------------------------------------------------------
+13.8  app/LaunchFlow（启动流程编排）
+--------------------------------------------------------------------------------
+
+	职责：
+
+	· 串联 config / instance / process / ipc / guardian 各层，完成一次启动
+	· 把加载器 stdout 与内部状态实时回调给调用方（UI）
+
+	方法：
+
+	static int run(const std::string& instanceName,
+				   std::function<void(const std::string&)> onOutput = nullptr);
+
+	· 阻塞执行，返回进程退出码（0 表示成功）
+	· onOutput 为空时内部直接丢弃状态信息
+
+	UI 线程模型（ui/MainWindow::handleLaunch）：
+
+	1. 切换到日志页并追加"准备启动实例"
+	2. QThread::create 开子线程，在子线程内调用 LaunchFlow::run
+	3. 回调经 QMetaObject::invokeMethod（Qt::QueuedConnection）
+	   回到主线程，写入 LogPanel
+	4. 线程结束 connect finished → deleteLater
+	5. 子线程内 try/catch 兜底，避免异常导致崩溃
+
+
+================================================================================
+第十四部分  内嵌资源释放逻辑（内嵌机制当前版本未实现）
+================================================================================
+
+说明：
+
+	· 内嵌资源（把 resources/ 打进 exe 资源段、启动时释放）当前版本未实现：
+	  GenerateResources.cmake / resources.rc 均未接入（见第四部分、第十六部分）
+	· 现有 ResourceExtractor 为过渡实现：从本地 resources/ 目录复制到目标位置，
+	  且尚未接入 GUI 启动流程（仅命令行自检 src/main-cmd.cpp 调用）
+	· 下表为设计稿中的释放映射
+
+--------------------------------------------------------------------------------
+14.1  启动器运行所需
+--------------------------------------------------------------------------------
+
+	内嵌资源					释放到							时机
+	----------------------		----------------------------	----------------
+	/launcher/ui-framework/*	%TEMP%\NewFogL\ui-framework\	首次启动 exe
+	/launcher/icons/*			%TEMP%\NewFogL\icons\			首次启动 exe
+	/launcher/lang/*			%TEMP%\NewFogL\lang\			首次启动 exe
+	/config/*					%TEMP%\NewFogL\config\			首次启动 exe
+
+
+--------------------------------------------------------------------------------
+14.2  游戏运行所需
+--------------------------------------------------------------------------------
+
+	内嵌资源					释放到											时机
+	----------------------		--------------------------------------------	----------------
+	/runtime/jre-17/*			.minecraft\runtime\jre-17\						首次启动游戏
+	/runtime/jre-21/*			.minecraft\runtime\jre-21\						首次启动游戏
+	/loaders/forge/*			.minecraft\NewFogL\loaders\						创建 Forge 实例时
+	/loaders/neoforge/*			.minecraft\NewFogL\loaders\						创建 NeoForge 实例时
+	/loaders/fabric/*			.minecraft\NewFogL\loaders\						创建 Fabric 实例时
+	/mods/fabric-api-*.jar		.minecraft\NewFogL\mods\{实例名}\mods\			创建 Fabric 实例时
+	/core/newfog-loader.jar		.minecraft\NewFogL\core\						首次启动游戏
+
+	注：Minecraft 1.20.1 核心（1.20.1.jar / 1.20.1.json）已从内嵌资源中移除，
+	    改由启动器从官方源（piston-meta.mojang.com）下载到
+	    .minecraft\versions\{实例名}\，时机为创建实例或首次启动（见 13.3）。
+
+
+--------------------------------------------------------------------------------
+14.3  解压触发条件
+--------------------------------------------------------------------------------
+
+	· %TEMP%\NewFogL\.version 不存在 → 全量解压
+	· %TEMP%\NewFogL\.version 存在但版本不匹配 → 清空后重新解压
+	· %TEMP%\NewFogL\.version 存在且版本匹配 → 跳过
+
+
+================================================================================
+第十五部分  日志系统
+================================================================================
+
+--------------------------------------------------------------------------------
+15.1  Logger 关键实现
+--------------------------------------------------------------------------------
+
+	格式：
+
+	[2026-10-15 14:30:01] [INFO] [Scanner] 开始扫描: D:\MC\NewFogL\mods\工业时代\mods
+
+	时间戳格式：yyyy-MM-dd HH:mm:ss
+
+	级别：DEBUG / INFO / WARN / ERROR / FATAL
+
+	模块：
+
+		UI         启动器界面事件         控制台 ✗
+		Config     配置读写               控制台 ✗
+		Instance   实例管理               控制台 ✗
+		Scanner    扫描 mod 目录          控制台 ✓
+		PreFlight  静态预检               控制台 ✓
+		Resolver   依赖解析               控制台 ✓
+		Arbiter    仲裁决策               控制台 ✓
+		Deploy     部署与重命名           控制台 ✓
+		Launcher   启动器拉起游戏         控制台 ✓
+		Game       游戏进程输出           控制台 ✓
+
+
+--------------------------------------------------------------------------------
+15.2  LogRotator（当前版本未实现）
+--------------------------------------------------------------------------------
+
+	说明：
+
+		· C++ 侧尚未实现日志轮转类 LogRotator；Logger 只写单个日志文件，不做切分
+		· Constants.h 已定义 LOG_MAX_SIZE / LOG_MAX_HISTORY（10 MB / 5 个），供将来实现使用
+		· 该设计已在 Java 侧实现：newfog-loader 的 log/LogRotator.java，由 NewFogLogger 调用
+
+	规则（设计稿）：
+
+	· 单文件超过 10 MB → 自动切分
+	· 保留最近 5 个历史文件
+	· 命名：runtime.log → runtime-1.log → runtime-2.log → ……
+	· 超出 5 个的自动删除最旧的
+
+
+================================================================================
+第十六部分  打包
+================================================================================
+
+--------------------------------------------------------------------------------
+16.1  编译流程
+--------------------------------------------------------------------------------
+
+	1. 配置 CMake
+	2. 编译 C++ 启动器
+	3. windeployqt 构建后复制 Qt 依赖库
+	4. 输出 NewFogL.exe
+
+	说明：
+
+		· 原设计"生成资源文件（GenerateResources.cmake）+ 内嵌资源"当前版本未实现，
+		  资源暂从本地 resources/ 目录复制释放
+
+
+--------------------------------------------------------------------------------
+16.2  GenerateResources功能（当前版本未实现）：
+
+	· 把 resources/ 下的文件转成 .rc 资源脚本
+	· 每个文件作为一个 RCDATA 嵌入
+	· 生成 resources.rc 供 CMake 使用
+
+
+--------------------------------------------------------------------------------
+16.3  内嵌资源总大小
+--------------------------------------------------------------------------------
+
+	内容							压缩前		压缩后
+	---------------------------		----------	----------
+	C++ 代码 + UI 框架				2 MB		1.5 MB
+	图标 + 语言 + 配置				0.5 MB		0.4 MB
+	JRE 17（100% 适配）				110 MB		约 65 MB
+	JRE 21（100% 适配）				120 MB		约 72 MB
+	Forge 安装器					7 MB		6 MB
+	NeoForge 安装器					7 MB		6 MB
+	Fabric Loader					1 MB		0.9 MB
+	newfog-loader.jar				3 MB		2.5 MB
+	fabric-api.jar					1.5 MB		1.3 MB
+	---------------------------		----------	----------
+	总计							约 252 MB	约 156 MB
+
+	（Minecraft 1.20.1 核心不内嵌，改为从官方源下载，故不计入上表。）
+
+	最终 exe 约 157-172 MB
+
+
+================================================================================
+第十七部分  开发顺序
+================================================================================
+
+	1. 工程骨架
+		· CMakeLists.txt
+		· 目录结构
+		· 第三方库集成
+
+	2. core/ 核心基础层
+		· Constants
+		· Logger
+		· Config
+		· PathResolver
+
+	3. fs/ 文件操作层
+		· FileUtil
+		· HardLink
+		· Junction
+		· FileLock
+
+	4. process/ 进程管理层
+		· ProcessLauncher
+		· ProcessMonitor
+		· ProcessKiller
+		· ProcessScanner
+
+	5. ipc/ 通信层
+		· StateParser
+		· LogForwarder
+		· RulesParser
+
+	6. guardian/ 守护层
+		· CrashDetector
+		· CrashAnalyzer
+
+	7. resource/ 内嵌资源释放
+		· ResourceExtractor
+		· VersionChecker
+
+	8. instance/ 实例管理
+		· InstanceConfig
+		· InstanceManager
+		· JunctionSync
+
+	9. pack/ 导出/导入模块
+		· PackManifest
+		· ManifestValidator
+		· PackExporter
+		· PackImporter
+
+	10. ui/ UI 层（Qt6 自绘）
+		· FramelessWindow（无边框窗口基类）
+		· MainWindow（主窗口 + 启动线程）
+		· Sidebar（侧边栏）
+		· LogPanel（日志面板）
+		· VersionSelectPage（版本选择页）
+		· InstanceSettingsPage（实例设置页）
+		· NFButton / NFListWidget / NFSwitch / NFDialog（自绘控件）
+		· app/LaunchFlow（启动流程编排，见 13.8 节）
+
+	11. 打包
+		· windeployqt 复制 Qt 依赖（已接入）
+		· GenerateResources.cmake / 内嵌资源（当前版本未实现）
+
+	12. 与加载器联调
+
+	13. 单元测试（当前版本未实现；命令行自检见 src/main-cmd.cpp）
+
+
+================================================================================
+第十八部分  待补充
+================================================================================
+
+	· UI 设计（后续补充）
+	· 图标设计
+	· 自动更新机制
+	· 数字签名
+
+
+================================================================================
+第十九部分  变更记录
+================================================================================
+
+	版本 1.2.0（本版本）
+		· Minecraft 1.20.1 核心（1.20.1.jar / 1.20.1.json）不再内嵌，
+		  改由启动器从官方源（piston-meta.mojang.com）下载到 versions\{实例名}\
+		· 第四部分 resources/ 目录树移除 minecraft/1.20.1/
+		· 11.1 ResourceExtractor 职责与 extractGameResources 注释去掉“释放游戏核心”
+		· 13.3 阶段2 改为“缺失/校验失败则从官方源下载或补全”
+		· 第十四部分 14.2 移除 /minecraft/1.20.1/* 行，改为说明由官方源下载
+		· 16.3 内嵌资源总大小剔除 MC 核心，总计改为约 252 MB / 约 156 MB，
+		  最终 exe 改为约 157-172 MB
+		· 登录方式只保留正版：侧边栏移除「离线」标签与切换开关，
+		  改为常驻「正版登录」徽标；Account.type 固定 "microsoft"，
+		  不再持久化 login/isOnline
+		· 移除设计：离线皮肤功能（删除 nf-skinmod.jar 内嵌资源、
+		  皮肤校验职责、PackIncludes.skins / ExportOptions.includeSkins、
+		  部署与体积表相关条目）
+
+	版本 1.1.0
+		· 入口由控制台迁移为 Qt6 GUI（QApplication + MainWindow）
+		· 项目结构按 CMakeLists.txt 的 SOURCES 显式清单重写，新增 app/ 启动流程层
+		· 第四部分 CMakeLists 配置改为真实的 Qt6 / SOURCES / windeployqt
+		· guardian 层移除不存在的 CrashDialog，并标注未实现
+		· pack 层：PackManifest 纯头文件、manifest 字段、导出导入流程、tar zip 对齐
+		· ipc 层：修正 StateParser 方法签名，新增 10.4 RulesParser
+		· instance 层：明确 InstanceConfigIO 类名与实例目录结构
+		· 第十三部分改为 main.cpp + app/LaunchFlow 真实链路，新增 13.8 节
+		· 文档描述但代码未实现的设计统一标注"（当前版本未实现）"
+		· 清理残损文本：5.1 补入 RESOURCE_VERSION 并修正 LOG_MAX_SIZE 类型；5.2 / 5.4 去除粘连与残行；第十四部分内嵌资源释放、第十五部分 LogRotator 标注"（当前版本未实现）"
+		· 补充清理残损文本：6.4 FileLock 伪代码、7.4 ProcessScanner、11.1 ResourceExtractor 签名对照代码修正（extractJre / needsExtract 为设计稿，当前版本未实现）
+
+	版本 1.0.0
+		· 首版：模块概述、进程树、项目结构、各层设计与启动流程
+
+
+================================================================================
+（启动器开发文档结束）
+================================================================================
+```

@@ -1,0 +1,890 @@
+================================================================================
+NewFogL 架构文档（完整版）
+================================================================================
+
+文档版本：1.2.0
+
+
+================================================================================
+一、目录结构
+================================================================================
+
+--------------------------------------------------------------------------------
+1.1 .minecraft 目录
+--------------------------------------------------------------------------------
+
+.minecraft｛任意目录名｝\
+│
+├── NewFogL.exe
+│
+├── versions\
+│   ├── 工业时代\
+│   │   ├── instance.json
+│   │   ├── 1.20.1.json
+│   │   ├── 1.20.1.jar
+│   │   ├── mods\                          → Junction
+│   │   ├── config\                        → Junction
+│   │   ├── defaultconfigs\                → Junction
+│   │   ├── saves\                         → Junction
+│   │   ├── resourcepacks\                 → Junction
+│   │   ├── shaderpacks\                   → Junction
+│   │   ├── screenshots\                   → Junction
+│   │   ├── logs\                          → Junction
+│   │   ├── crash-reports\                 → Junction
+│   │   ├── options.txt                    → Junction
+│   │   ├── servers.dat                    → Junction
+│   │   ├── journeymap\                    → Junction
+│   │   ├── xaero\                         → Junction
+│   │   ├── iris\                          → Junction
+│   │   ├── sodium\                        → Junction
+│   │   └── ...（其他 mod 文件夹全部 Junction）
+│   │
+│   ├── 纯净生存\
+│   └── 光影测试\
+│
+├── NewFogL\
+│   ├── NewFogL-config.json
+│   │
+│   ├── instances\
+│   │   ├── 工业时代.json
+│   │   ├── 纯净生存.json
+│   │   └── 光影测试.json
+│   │
+│   ├── mods\
+│   │   ├── 工业时代\
+│   │   │   └── mods\
+│   │   ├── 纯净生存\
+│   │   │   └── mods\
+│   │   └── 光影测试\
+│   │       └── mods\
+│   │
+│   ├── cache\
+│   │   ├── 工业时代\
+│   │   │   ├── mods-deployed\
+│   │   │   ├── configs\
+│   │   │   ├── defaultconfigs\
+│   │   │   ├── saves\
+│   │   │   ├── resourcepacks\
+│   │   │   ├── shaderpacks\
+│   │   │   ├── screenshots\
+│   │   │   ├── logs\
+│   │   │   ├── crash-reports\
+│   │   │   ├── options.txt
+│   │   │   ├── servers.dat
+│   │   │   ├── journeymap\
+│   │   │   ├── xaero\
+│   │   │   ├── iris\
+│   │   │   ├── sodium\
+│   │   │   ├── newfog-rules.json
+│   │   │   ├── newfog-fingerprint.sha256
+│   │   │   └── deploy-manifest.json
+│   │   ├── 纯净生存\
+│   │   └── 光影测试\
+│   │
+│   ├── shared\
+│   │
+│   ├── exports\
+│   │   ├── 工业时代-v1.0.0.nfp
+│   │   └── 临时文件\
+│   │
+│   ├── imports\
+│   │   └── (解压中的临时文件)
+│   │
+│   └── logs\
+│       ├── launcher.log
+│       ├── pack-export.log
+│       ├── pack-import.log
+│       ├── 工业时代\
+│       │   └── runtime.log
+│       ├── 纯净生存\
+│       └── 光影测试\
+│
+├── libraries\
+├── assets\
+└── runtime\
+    ├── jre-17\
+    │   └── bin\
+    │       └── java.exe
+    └── jre-21\
+        └── bin\
+            └── java.exe
+
+
+--------------------------------------------------------------------------------
+1.2 NewFogL.exe 内嵌结构
+--------------------------------------------------------------------------------
+
+NewFogL.exe（二进制文件）
+│
+├── [PE头]
+├── [代码段]（Qt6 Widgets GUI，源码清单见 newfogl-launcher\CMakeLists.txt 的 SOURCES）
+│   ├── core/                             # Constants / Logger / Config / PathResolver
+│   ├── fs/                               # FileUtil / HardLink / FileLock / Junction
+│   ├── process/                          # ProcessLauncher / ProcessMonitor / ProcessKiller / ProcessScanner
+│   ├── ipc/                              # StateParser / LogForwarder / RulesParser
+│   ├── guardian/                         # CrashDetector / CrashAnalyzer（无 CrashDialog）
+│   ├── resource/                         # VersionChecker / ResourceExtractor
+│   ├── instance/                         # InstanceConfig / InstanceManager / JunctionSync
+│   ├── pack/                             # PackManifest / ManifestValidator / PackExporter / PackImporter
+│   ├── app/                              # LaunchFlow（启动流程编排层）
+│   └── ui/                               # FramelessWindow / MainWindow / Sidebar / LogPanel / VersionSelectPage
+│                                         # InstanceSettingsPage / NFButton / NFListWidget / NFSwitch / NFDialog
+│                                         # 另存有 ui/InstanceSelectPage、src/main-cmd.cpp，未纳入编译
+│
+├── [资源段]
+│   │
+│   ├── /launcher/
+│   │   ├── NewFogL.exe.manifest
+│   │   ├── qt-runtime/
+│   │   │   ├── Qt6Core.dll
+│   │   │   ├── Qt6Gui.dll
+│   │   │   ├── Qt6Widgets.dll
+│   │   │   └── ...
+│   │   ├── icons/
+│   │   │   ├── app.ico
+│   │   │   ├── instance-default.png
+│   │   │   ├── loader-forge.png
+│   │   │   ├── loader-neoforge.png
+│   │   │   ├── loader-fabric.png
+│   │   │   ├── pack-export.png
+│   │   │   └── pack-import.png
+│   │   └── lang/
+│   │       └── zh-CN.json
+│   │
+│   ├── /runtime/
+│   │   ├── jre-17/                       # 模块清单见附录 A
+│   │   │   ├── bin/
+│   │   │   │   └── java.exe
+│   │   │   ├── lib/
+│   │   │   ├── conf/
+│   │   │   └── release
+│   │   └── jre-21/                       # 模块清单见附录 B
+│   │       ├── bin/
+│   │       │   └── java.exe
+│   │       ├── lib/
+│   │       ├── conf/
+│   │       └── release
+│   │
+│   ├── （不含 /minecraft/ 段）
+│   │   └── 1.20.1.jar / 1.20.1.json 不内嵌；创建实例或首次启动时，
+│   │       由启动器从官方源（piston-meta.mojang.com）下载到
+│   │       .minecraft\versions\{实例名}\
+│   │
+│   ├── /loaders/
+│   │   ├── forge/
+│   │   │   └── forge-1.20.1-47.4.26-installer.jar
+│   │   ├── neoforge/
+│   │   │   └── forge-1.20.1-47.1.100-installer.jar
+│   │   └── fabric/
+│   │       └── fabric-loader-0.15.11.jar
+│   │
+│   ├── /mods/
+│   │   └── fabric-api-0.92.12+1.20.1.jar
+│   │
+│   ├── /core/
+│   │   └── newfog-loader.jar
+│   │
+│   └── /config/
+│       ├── NewFogL-config.json
+│       ├── instance-template.json
+│       └── pack-manifest-template.json
+│
+└── [签名段]
+
+
+================================================================================
+二、启动流程
+================================================================================
+
+注意：以下两份流程不是并列关系，是嵌套关系。
+
+  · 流程 A：双击 NewFogL.exe 后，C++ 启动器的完整流程（13 阶段）。
+  · 流程 B：在流程 A 的阶段 4~10 里，调用 New Fog 加载器执行的完整流程（10 阶段）。
+
+
+--------------------------------------------------------------------------------
+2.1 流程 A：启动器完整流程（13 阶段）
+--------------------------------------------------------------------------------
+
+[双击 NewFogL.exe]
+    │
+    ▼
+[阶段0] 内嵌资源释放 → 定位 .minecraft → 读取全局配置 → 加载实例列表 → 日志初始化
+    │
+    ▼
+[阶段1] 用户选择实例 → 读取实例配置 → 校验完整性 → 显示详情
+    │
+    ▼
+[阶段2] 游戏核心校验 → 1.20.1.jar / 1.20.1.json 存在且版本正确？
+    │
+    ├── 缺失或校验失败 → 从官方源下载/补全
+    │                     └── 下载失败 → 中止
+    │
+    ▼ 通过
+[阶段3] Java 运行时校验 → javaPath 存在且版本匹配？
+    │
+    ├── 失败 → 按提示开关处理
+    │
+    ▼ 通过
+[阶段4] 静态预检 → 扫描 mod → 打标签 → 五道红线 → Java 版本冲突
+    │
+    ├── 触发红线 → 中止
+    │
+    ▼ 通过
+[阶段5] 依赖解析 → 拓扑排序 → Tarjan SCC → 库类先行
+    │
+    ▼
+[阶段6] 加载器优先级 → 统计数量 → 动态排序
+    │
+    ▼
+[阶段7] 指纹比对 → 一致则跳过阶段8
+    │
+    ▼ 不一致
+[阶段8] 部署与 Junction → 重命名 → 硬链接 → 同步 Junction
+    │
+    ▼
+[阶段9] 沙盒规划 → 库类先加载 → 共享库放父加载器 → 模组后加载
+    │
+    ▼
+[阶段10] 生成启动脚本 → UTF-8 保存
+    │
+    ▼
+[阶段11] 拉起游戏进程 → 检测残留 → 执行脚本 → 建立 IPC → UI 运行中
+    │
+    ▼
+[阶段12] 运行时监控 → 内存监控 → 崩溃检测 → 日志转发
+    │
+    ▼ 游戏退出
+[阶段13] 退出清理 → 更新实例配置 → 同步文件 → UI 恢复
+
+
+--------------------------------------------------------------------------------
+2.2 流程 B：New Fog 加载器流程（10 阶段）
+--------------------------------------------------------------------------------
+
+[用户点击“启动游戏”]
+    │
+    ▼
+[阶段1] 扫描 mods\ → 过滤 .jar → 记录哈希
+    │
+    ▼
+[阶段2] 解析元数据 → 判定加载器归属 → 封装 ModDescriptor
+    解析时读取 META-INF/jarjar/ 下的嵌套 jar，把里面的 modId 记入 ModDescriptor.bundledModIds。依赖检查时，这些 modId 视为“已提供”。
+    │
+    ▼
+[阶段3] 分配全局长 ID → 分配短编号 → 建立映射表
+    │
+    ▼
+[阶段4] 静态预检：
+    │   ├── 4.1 多版本拦截
+    │   ├── 4.2 缝合怪拦截
+    │   ├── 4.3 依赖模糊拦截
+    │   ├── 4.4 套壳模组拦截
+    │   └── 4.5 跨加载器重复拦截
+    │
+    ├── 触发 → 中止 + 弹窗（当前版本未实现弹窗，仅日志中止）
+    │
+    ▼ 通过
+[阶段5] 构建依赖图 → 拓扑排序 → Tarjan SCC 处理环组 → 库类先行
+    │
+    ▼
+[阶段6] 统计加载器数量 → 动态优先级排序 → Forge > NeoForge > Fabric 兜底
+    │
+    ▼
+[阶段7] 计算指纹 → 比对缓存 → 一致则跳过阶段8
+    │
+    ▼
+[阶段8] 清理旧部署 → 按规则重命名 → 硬链接/复制 → 写清单
+    │
+    ▼
+[阶段9] 沙盒规划 → 库类先加载 → 共享库放父加载器 → 模组后加载
+    │
+    ▼
+[阶段10] 生成启动脚本 → 传递加载计划 → 交给启动器拉起游戏
+
+
+--------------------------------------------------------------------------------
+嵌套关系说明
+--------------------------------------------------------------------------------
+
+  · 流程 A 的阶段 4~10，执行的就是流程 B 的全部 10 个阶段。
+  · 流程 B 结束后，回到流程 A 的阶段 11，继续拉起游戏进程。
+
+
+--------------------------------------------------------------------------------
+2.3 实际启动流程（C++ 启动器，app/LaunchFlow.cpp）
+--------------------------------------------------------------------------------
+
+  当前版本 C++ 启动器已从控制台迁移为 Qt6 Widgets 图形界面，入口为
+  src/main.cpp（创建 QApplication + MainWindow），启动编排集中在
+  app/LaunchFlow.cpp，真实流程如下：
+
+    [1] 校验实例
+    [2] 同步 Junction
+    [3] 解析 JRE / loader / jars
+    [4] 启动 Java 加载器（newfog-loader.jar）
+    [5] 转发日志 / 解析 [STATE] 行
+    [6] 收到 PLAN_READY 后读取 newfog-rules.json
+    [7] 处理游戏退出码
+    [8] CrashDetector / CrashAnalyzer 分析崩溃
+
+
+================================================================================
+三、核心设计原则
+================================================================================
+
+原则          | 体现
+--------------|------------------------------------------------------------
+快速失败      | 五道红线全部在静态预检阶段执行，触发即中止
+物理隔离      | 每个加载器独立沙盒，库类先加载，共享库放父加载器
+静态预判      | 不进行运行时共存测试，全靠元数据分析和拓扑排序（三加载器共存当前版本未实现）
+资源约束      | 通过指纹比对跳过重复部署，节省启动时间
+复杂问题降维  | Tarjan SCC 处理循环依赖，短编号提升效率
+极致可读性    | 部署文件命名 F001_jei.jar，日志带 [NewFog] 前缀
+
+
+================================================================================
+四、日志系统
+================================================================================
+
+--------------------------------------------------------------------------------
+4.1 日志级别
+--------------------------------------------------------------------------------
+
+级别   | 用途               | 示例
+-------|--------------------|--------------------------------------------------
+DEBUG  | 调试细节，默认开启 | [DEBUG] 解析 fabric.mod.json: sodium
+INFO   | 正常流程节点       | [INFO] 扫描到 47 个模组
+WARN   | 可恢复的异常       | [WARN] 模组 X 的依赖版本范围过宽
+ERROR  | 红线拦截、崩溃     | [ERROR] 多版本模组: sodium (0.5.8, 0.6.0)
+FATAL  | 启动中止           | [FATAL] 检测到跨加载器缝合模组，中止启动
+
+
+--------------------------------------------------------------------------------
+4.2 输出目标
+--------------------------------------------------------------------------------
+
+目标     | 说明
+---------|------------------------------------------------------------
+控制台   | 启动器运行时，实时打印到 stdout
+文件     | 写入 NewFogL\logs\launcher.log
+UI 面板  | 启动器窗口内的日志区域，实时滚动
+
+
+--------------------------------------------------------------------------------
+4.3 输出规则
+--------------------------------------------------------------------------------
+
+  · 时间戳精确到秒：yyyy-MM-dd HH:mm:ss，不带毫秒
+  · DEBUG 默认开启
+  · 控制台只输出加载器和游戏日志
+
+
+--------------------------------------------------------------------------------
+4.4 模块与过滤
+--------------------------------------------------------------------------------
+
+模块名      | 用途             | 控制台
+------------|------------------|--------
+UI          | 启动器界面事件   |   ✗
+Config      | 配置读写         |   ✗
+Instance    | 实例管理         |   ✗
+Scanner     | 扫描 mod 目录    |   ✓
+PreFlight   | 静态预检         |   ✓
+Resolver    | 依赖解析         |   ✓
+Arbiter     | 仲裁决策         |   ✓
+Deploy      | 部署与重命名     |   ✓
+Launcher    | 启动器拉起游戏   |   ✓
+Game        | 游戏进程输出     |   ✓
+
+
+--------------------------------------------------------------------------------
+4.5 日志轮转
+--------------------------------------------------------------------------------
+
+  · 单文件超过 10 MB → 自动切分
+  · 保留最近 5 个历史文件
+  · 轮转命名：runtime.log → runtime-1.log → runtime-2.log → ……
+  · 超出 5 个的自动删除最旧的
+
+
+================================================================================
+五、导出/导入逻辑
+================================================================================
+
+--------------------------------------------------------------------------------
+5.1 导出逻辑
+--------------------------------------------------------------------------------
+
+[步骤1] 弹出导出向导
+    - 整合包名称（默认=实例名）
+    - 整合包版本（默认=1.0.0）
+    - 作者（默认=当前账号名）
+    - 描述（空）
+    - 封面图（可选，PNG/JPG，≤1MB）
+    │
+    ▼
+[步骤2] 勾选要包含的内容
+    [✓] 模组 jar（强制）
+    [✓] 模组配置（configs）
+    [✓] 默认配置（defaultconfigs）
+    [✓] 实例配置（instance.json）
+    [ ] 存档（saves）
+    [ ] 资源包（resourcepacks）
+    [ ] 光影（shaderpacks）
+    [ ] 截图（screenshots）
+    [ ] 服务器列表（servers.dat）
+    [ ] 游戏选项（options.txt）
+    │
+    ▼
+[步骤3] 计算体积
+    - 遍历选中的内容，统计总大小
+    - UI 显示“预计大小：约 XXX MB”
+    - 如果 > 1GB，提示耗时
+    │
+    ▼
+[步骤4] 选择保存位置
+    - 默认：NewFogL\exports\{实例名}-v{版本}.nfp
+    - 用户可自定义
+    │
+    ▼
+[步骤5] 执行打包
+    - 创建临时目录 NewFogL\exports\临时文件\{时间戳}\
+    - 复制实例配置到临时目录
+    - 生成 manifest.json
+    - 复制选中的文件到临时目录对应位置
+    - 压缩成 .nfp
+    - 移动到目标位置
+    - 删除临时目录
+    │
+    ▼
+[步骤6] 日志记录到 pack-export.log
+    │
+    ▼
+[步骤7] 提示完成
+    - 显示文件路径和大小
+    - 提供“打开所在文件夹”按钮
+
+
+导出时源路径：
+
+导出内容     | 源路径
+-------------|------------------------------------------------------------
+模组 jar     | NewFogL\cache\{实例名}\mods-deployed\
+模组配置     | NewFogL\cache\{实例名}\configs\
+默认配置     | NewFogL\cache\{实例名}\defaultconfigs\
+实例配置     | versions\{实例名}\instance.json
+存档         | NewFogL\cache\{实例名}\saves\
+资源包       | NewFogL\cache\{实例名}\resourcepacks\
+光影         | NewFogL\cache\{实例名}\shaderpacks\
+截图         | NewFogL\cache\{实例名}\screenshots\
+服务器列表   | NewFogL\cache\{实例名}\servers.dat
+游戏选项     | NewFogL\cache\{实例名}\options.txt
+
+
+--------------------------------------------------------------------------------
+5.2 导入逻辑
+--------------------------------------------------------------------------------
+
+[步骤1] 选择 .nfp 文件
+    │
+    ▼
+[步骤2] 校验文件头
+    - 检查是否为 zip 格式
+    - 检查是否包含 manifest.json
+    - 失败 → 提示“不是有效的整合包”
+    │
+    ▼
+[步骤3] 读取 manifest.json
+    - 校验 formatVersion
+    - 校验 gameVersion == "1.20.1"
+    - 校验 loader ∈ {forge, neoforge, fabric}
+    - 失败 → 提示具体原因
+    │
+    ▼
+[步骤4] 显示整合包信息
+    - 名称、版本、作者、描述、模组数、加载器
+    │
+    ▼
+[步骤5] 让用户设置实例名
+    - 默认 = manifest.packName
+    - 如果已存在同名实例 → 提示“覆盖/重命名/取消”
+    │
+    ▼
+[步骤6] 用户确认内存等配置
+    - 内存从 manifest.recommendedMemory 读取
+    - 用户可修改
+    │
+    ▼
+[步骤7] 解压到暂存区
+    - 解压到 NewFogL\imports\{时间戳}\
+    - 校验文件完整性（jar 能否打开、manifest 里的文件是否都在）
+    │
+    ▼
+[步骤8] 自动创建实例（以下全部自动完成）
+    ├── 创建 versions\{新实例名}\
+    ├── 从官方源下载 1.20.1.jar + 1.20.1.json（已存在则跳过）
+    ├── 释放加载器核心（forge/neoforge/fabric）
+    ├── 创建 NewFogL\mods\{新实例名}\mods\
+    ├── 复制解压的模组到 mods\
+    ├── 创建 NewFogL\cache\{新实例名}\
+    ├── 复制配置到 cache\{新实例名}\configs\
+    ├── 复制存档到 versions\{新实例名}\saves\
+    ├── 创建 NewFogL\instances\{新实例名}.json
+    ├── 写入 instance.json 到 versions\{新实例名}\
+    └── 建立所有 Junction
+    │
+    ▼
+[步骤9] 清理暂存区
+    - 删除 NewFogL\imports\{时间戳}\
+    │
+    ▼
+[步骤10] 日志记录到 pack-import.log
+    │
+    ▼
+[步骤11] 实例出现在列表中
+    - 用户可以点击“启动游戏”
+
+
+导入时目标路径：
+
+导入内容     | 目标路径
+-------------|------------------------------------------------------------
+模组 jar     | NewFogL\mods\{新实例名}\mods\
+模组配置     | NewFogL\cache\{新实例名}\configs\
+默认配置     | NewFogL\cache\{新实例名}\defaultconfigs\
+实例配置     | versions\{新实例名}\instance.json
+存档         | versions\{新实例名}\saves\
+资源包       | versions\{新实例名}\resourcepacks\
+光影         | versions\{新实例名}\shaderpacks\
+截图         | versions\{新实例名}\screenshots\
+服务器列表   | versions\{新实例名}\servers.dat
+游戏选项     | versions\{新实例名}\options.txt
+
+
+--------------------------------------------------------------------------------
+5.3 .nfp 内部结构
+--------------------------------------------------------------------------------
+
+工业时代-v1.0.0.nfp（zip 压缩包）
+│
+├── manifest.json                    # 整合包元数据
+├── preview.png                      # 封面图（可选）
+├── instance.json                    # 实例配置模板
+│
+├── mods\                            # 模组 jar（重命名后的）
+│   ├── F001_jei.jar
+│   ├── F003_create.jar
+│   └── B015_sodium.jar
+│
+├── configs\                         # 模组配置
+├── defaultconfigs\                  # 默认配置
+├── saves\                           # 存档（可选）
+├── resourcepacks\                   # 资源包（可选）
+├── shaderpacks\                     # 光影（可选）
+├── screenshots\                     # 截图（可选）
+├── servers.dat                      # 服务器列表（可选）
+└── options.txt                      # 游戏选项（可选）
+
+
+--------------------------------------------------------------------------------
+5.4 manifest.json 结构
+--------------------------------------------------------------------------------
+
+{
+  "formatVersion": 1,
+  "packName": "工业时代",
+  "packVersion": "1.0.0",
+  "author": "Steve",
+  "description": "一个以机械动力为核心的工业整合包",
+  "createdAt": "2026-10-15T12:00:00Z",
+
+  "gameVersion": "1.20.1",
+  "loader": "forge",
+  "loaderVersion": "47.4.26",
+  "javaVersion": 17,
+  "recommendedMemory": "8G",
+  "minMemory": "4G",
+
+  "modCount": 47,
+  "mods": [
+    { "file": "mods/F001_jei.jar", "modId": "jei", "version": "15.2.0" }
+  ],
+
+  "includes": {
+    "saves": true,
+    "resourcepacks": false,
+    "shaderpacks": false,
+    "screenshots": false,
+    "servers": true,
+    "options": true
+  },
+
+  "checksum": "a3f8c2e1b9d4..."
+}
+
+
+--------------------------------------------------------------------------------
+5.5 错误处理
+--------------------------------------------------------------------------------
+
+错误场景                    | 处理方式
+----------------------------|--------------------------------------------
+.nfp 不是 zip               | 提示“文件损坏或格式错误”
+manifest.json 缺失          | 提示“整合包元数据缺失”
+formatVersion 不匹配        | 提示“整合包版本过新，请升级 NewFogL”
+gameVersion 不是 1.20.1     | 提示“只支持 1.20.1 整合包”
+loader 不支持               | 提示“不支持的加载器：xxx”
+磁盘空间不足                | 提示“需要 XXX MB，当前可用 XXX MB”
+同名实例已存在              | 提供覆盖/重命名/取消三个选项
+导出时模组文件被占用        | 提示“请关闭游戏后重试”
+解压时文件损坏              | 提示“整合包文件损坏，请重新下载”
+
+
+--------------------------------------------------------------------------------
+5.6 文件占用处理
+--------------------------------------------------------------------------------
+
+导出时：
+  · 检测 NewFogL\cache\{实例名}\mods-deployed\ 是否被占用。
+  · 如果游戏正在运行（检测 java.exe 进程），提示“请关闭游戏后重试”。
+
+导入时：
+  · 检测 versions\{新实例名}\ 是否被占用。
+  · 如果目标实例正在运行，提示“该实例正在运行，请先关闭游戏”。
+
+
+--------------------------------------------------------------------------------
+5.7 核心原则
+--------------------------------------------------------------------------------
+
+  导出/导入彻底和 mod 加载器解耦。所有 mod 层面的检查，都留到用户点击
+  “启动游戏”时才做。
+
+
+================================================================================
+六、附录
+================================================================================
+
+--------------------------------------------------------------------------------
+附录 A：Java 17 保留模块清单
+--------------------------------------------------------------------------------
+
+java.base
+java.compiler
+java.datatransfer
+java.desktop
+java.instrument
+java.logging
+java.management
+java.management.rmi
+java.naming
+java.net.http
+java.prefs
+java.rmi
+java.scripting
+java.security.jgss
+java.security.sasl
+java.smartcardio
+java.sql
+java.sql.rowset
+java.transaction.xa
+java.xml
+java.xml.crypto
+jdk.attach
+jdk.charsets
+jdk.crypto.cryptoki
+jdk.crypto.ec
+jdk.crypto.mscapi
+jdk.dynalink
+jdk.httpserver
+jdk.internal.vm.ci
+jdk.internal.vm.compiler
+jdk.internal.vm.compiler.management
+jdk.jfr
+jdk.jsobject
+jdk.localedata
+jdk.management
+jdk.management.agent
+jdk.management.jfr
+jdk.naming.dns
+jdk.naming.rmi
+jdk.net
+jdk.nio.mapmode
+jdk.security.auth
+jdk.security.jgss
+jdk.unsupported
+jdk.unsupported.desktop
+jdk.xml.dom
+jdk.zipfs
+
+
+--------------------------------------------------------------------------------
+附录 B：Java 21 保留模块清单
+--------------------------------------------------------------------------------
+
+java.base
+java.compiler
+java.datatransfer
+java.desktop
+java.instrument
+java.logging
+java.management
+java.management.rmi
+java.naming
+java.net.http
+java.prefs
+java.rmi
+java.scripting
+java.security.jgss
+java.security.sasl
+java.smartcardio
+java.sql
+java.sql.rowset
+java.transaction.xa
+java.xml
+java.xml.crypto
+jdk.attach
+jdk.charsets
+jdk.crypto.cryptoki
+jdk.crypto.ec
+jdk.crypto.mscapi
+jdk.dynalink
+jdk.httpserver
+jdk.incubator.vector
+jdk.internal.vm.ci
+jdk.internal.vm.compiler
+jdk.internal.vm.compiler.management
+jdk.jfr
+jdk.jsobject
+jdk.localedata
+jdk.management
+jdk.management.agent
+jdk.management.jfr
+jdk.naming.dns
+jdk.naming.rmi
+jdk.net
+jdk.nio.mapmode
+jdk.sctp
+jdk.security.auth
+jdk.security.jgss
+jdk.unsupported
+jdk.unsupported.desktop
+jdk.xml.dom
+jdk.zipfs
+
+
+--------------------------------------------------------------------------------
+附录 C：instance.json 完整字段
+--------------------------------------------------------------------------------
+
+{
+  "instanceName": "工业时代",
+  "gameVersion": "1.20.1",
+  "loader": "forge",
+  "loaderVersion": "47.4.26",
+  "javaVersion": 17,
+  "javaPath": "runtime\\jre-17\\bin\\java.exe",
+  "maxMemory": "8G",
+  "minMemory": "4G",
+  "jvmArgs": [],
+  "javaErrorPrompt": {
+    "showVersionConflict": true,
+    "showMissingJava": true,
+    "showLoaderIncompatible": true,
+    "showModJavaMismatch": true
+  },
+  "javaConflictResolved": false,
+  "lastLaunched": "2026-10-15T12:00:00Z",
+  "lastResult": "success"
+}
+
+
+--------------------------------------------------------------------------------
+附录 D：NewFogL-config.json 完整字段
+--------------------------------------------------------------------------------
+
+{
+  "version": "1.0.0",
+  "accounts": [],
+  "java": {
+    "jre17Path": "runtime\\jre-17\\bin\\java.exe",
+    "jre21Path": "runtime\\jre-21\\bin\\java.exe",
+    "defaultVersion": 17
+  },
+  "ui": {
+    "language": "zh-CN",
+    "theme": "dark",
+    "windowWidth": 900,
+    "windowHeight": 600
+  },
+  "download": {
+    "mirror": "official",
+    "maxThreads": 4
+  },
+  "logging": {
+    "debugEnabled": true,
+    "consoleFilter": ["Scanner", "PreFlight", "Resolver", "Arbiter", "Deploy", "Launcher", "Game"]
+  }
+}
+
+注：accounts 仅保存正版账号（type 固定 "microsoft"），未登录时为空数组；
+启动器不再提供离线登录。
+
+
+--------------------------------------------------------------------------------
+附录 E：五道红线
+--------------------------------------------------------------------------------
+
+红线            | 触发条件                                          | 弹窗标题
+----------------|---------------------------------------------------|----------------------------
+多版本拦截      | 同一加载器下同名 modid 多版本                     | 检测到多版本模组
+缝合怪拦截      | Forge 模组依赖 Fabric API，或反之                 | 检测到违禁的跨加载器兼容层
+依赖模糊        | 缺少硬依赖、元数据解析失败、加载器归属不明        | 依赖解析失败
+套壳模组拦截    | 字节码相似度 >85% 且功能标签重叠                  | 检测到套壳模组
+跨加载器重复    | 同一 modid 出现在多个加载器中（核心库白名单除外） | 同一模组存在于多个加载器
+
+注：表中“弹窗标题”为设计规划，当前版本未实现拦截/崩溃弹窗（CrashDialog），仅输出日志。
+
+
+================================================================================
+变更记录
+================================================================================
+
+--------------------------------------------------------------------------------
+版本 1.2.0（游戏核心改从官方源拉取）
+--------------------------------------------------------------------------------
+
+  · 1.2 资源段：移除 /minecraft/1.20.1/，1.20.1.jar 与 1.20.1.json 不再内嵌，
+    改由启动器从官方源（piston-meta.mojang.com）下载到 versions\{实例名}\。
+  · 2.1 阶段2：游戏核心校验失败时不再直接中止，改为从官方源下载/补全，
+    下载失败才中止。
+  · 导入整合包步骤8：由“释放 1.20.1.jar + 1.20.1.json”改为从官方源下载。
+  · 附录 D：补充说明 accounts 仅保存正版账号（type 固定 microsoft），
+    未登录时为空数组；启动器不再提供离线登录。
+  · 文档版本由 1.1.0 升为 1.2.0。
+
+--------------------------------------------------------------------------------
+版本 1.1.0（对齐真实代码）
+--------------------------------------------------------------------------------
+
+  · 1.2 内嵌结构：UI 框架由 imgui 更正为 Qt6 Widgets，[代码段] 改为
+    newfogl-launcher\CMakeLists.txt 的真实 SOURCES 模块清单。
+  · 二、启动流程：新增 2.3 实际启动流程（app/LaunchFlow.cpp），
+    说明入口 src/main.cpp 与 Qt6 GUI 现状。
+  · 1.2 的 nf-skinmod.jar、2.1 阶段8、2.2 阶段4、三、附录 E：对离线皮肤、
+    拦截弹窗、三加载器共存等未实现设计追加“（当前版本未实现）”。
+  · 移除设计：离线皮肤功能（删除 nf-skinmod.jar、皮肤解析校验、皮肤参数、
+    导出/导入的 skins 相关条目）。
+  · 文档版本由 1.0.0 升为 1.1.0。
+
+--------------------------------------------------------------------------------
+版本 1.0.0
+--------------------------------------------------------------------------------
+
+  · 初始版本。
+
+
+================================================================================
+（文档结束）
+================================================================================
